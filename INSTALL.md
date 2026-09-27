@@ -29,7 +29,7 @@ This writes only the `web` profile. Reopen a running Web Host once and reload th
    subscription routes of [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login).
 2. Open **Settings → Fusion**, choose the Lead and the Sidekick, and save.
 3. Select **Fusion · auto** in the model menu.
-4. On Linux or Windows, run the read-only check in [README.en.md](README.en.md#support) before real use.
+4. Windows is not supported yet. On Linux, run the read-only check in [README.en.md](README.en.md#support) before real use.
 
 ## Uninstall
 
