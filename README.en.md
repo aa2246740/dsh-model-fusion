@@ -9,6 +9,8 @@ In DeepSeek Harness (DSH), Fusion is one entry in the model menu: **Fusion · au
 
 One goal: **frontier-model results at a discount.**
 
+Inspired by Fusion in Cognition's Devin. This is an independent implementation, not affiliated with Cognition.
+
 ## Measured
 
 Nine real open-source issues (SWE-rebench, Python), two runs each, graded by hidden tests. Lead GPT-6 Astra (high), Sidekick GLM-5.3-Flash (high):

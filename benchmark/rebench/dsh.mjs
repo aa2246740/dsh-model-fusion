@@ -7,6 +7,7 @@
 //   select  <cwd> <provider> <model> [effort]               -> select in a blank session (DSH saves it as the default model)
 //   prompt  <sessionId> <promptFile>                        -> queue a follow-up user turn in an existing session
 //   running <sessionId>                                     -> prints {"running": bool}
+//   busy                                                    -> sessions currently running (check before quitting the Host)
 //   cancel  <sessionId>
 //   settings                                                -> Fusion pair/policy (no catalog)
 //   cache                                                   -> Fusion per-model cache keepalive view
@@ -72,6 +73,9 @@ if (command === 'start') {
   const list = await rpc('session/list', { _request: {} })
   const item = list.items.find(row => row.sessionId === args[0])
   out({ running: Boolean(item?.running), known: Boolean(item) })
+} else if (command === 'busy') {
+  const list = await rpc('session/list', { _request: {} })
+  out({ total: list.items.length, running: list.items.filter(row => row.running).map(row => ({ sessionId: row.sessionId, title: row.title, cwd: row.cwd })) })
 } else if (command === 'cancel') {
   out(await rpc('session/cancel', { request: { sessionId: args[0] } }))
 } else if (command === 'settings') {

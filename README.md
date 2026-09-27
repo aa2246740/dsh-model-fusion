@@ -9,6 +9,8 @@ Fusion 在 DeepSeek Harness（DSH）的模型菜单里是一个普通模型：**
 
 目标只有一个：**用前沿模型的效果，付打折的价钱。**
 
+思路受 Cognition 在 Devin 里推出的 Fusion 启发，这是一个独立实现，与 Cognition 无关。
+
 ## 实测效果
 
 9 道真实开源项目的题（SWE-rebench，Python），每题跑 2 次，用隐藏测试判定对错。Lead 为 GPT-6 Astra（high），Sidekick 为 GLM-5.3-Flash（high）：
