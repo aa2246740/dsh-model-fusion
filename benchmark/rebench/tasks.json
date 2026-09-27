@@ -1,0 +1,10 @@
+{
+  "dataset": "nebius/SWE-rebench-leaderboard",
+  "split": "2026_03",
+  "selection": "Python 3.13 pip installs without compiled builds; difficulty tier by gold patch size (files, changed lines); each instance validated locally: FAIL_TO_PASS fail at base, all FAIL_TO_PASS and PASS_TO_PASS pass with the gold patch.",
+  "tiers": {
+    "easy":   ["pypa__twine-1309", "delgan__loguru-1451", "sqlfluff__sqlfluff-7615"],
+    "medium": ["pycqa__isort-2491", "holoviz__param-1117", "ucfopen__canvasapi-716"],
+    "hard":   ["pallets__click-3239", "python-scim__scim2-models-139_interface", "pallets-eco__wtforms-892_interface"]
+  }
+}

@@ -1,0 +1,9 @@
+{"iid": "pypa__twine-1309", "tier": "easy", "seconds": 17, "disk": "47M", "base_f2p_failing": 1, "f2p_total": 1, "gold_f2p_pass": 1, "gold_p2p_pass": 3, "p2p_total": 3, "gold_p2p_failing": [], "valid": true}
+{"iid": "delgan__loguru-1451", "tier": "easy", "seconds": 38, "disk": "208M", "base_f2p_failing": 2, "f2p_total": 2, "gold_f2p_pass": 2, "gold_p2p_pass": 22, "p2p_total": 22, "gold_p2p_failing": [], "valid": true}
+{"iid": "sqlfluff__sqlfluff-7615", "tier": "easy", "seconds": 25, "disk": "236M", "base_f2p_failing": 1, "f2p_total": 1, "gold_f2p_pass": 1, "gold_p2p_pass": 24, "p2p_total": 24, "gold_p2p_failing": [], "valid": true}
+{"iid": "pycqa__isort-2491", "tier": "medium", "seconds": 12, "disk": "36M", "base_f2p_failing": 1, "f2p_total": 1, "gold_f2p_pass": 1, "gold_p2p_pass": 73, "p2p_total": 73, "gold_p2p_failing": [], "valid": true}
+{"iid": "holoviz__param-1117", "tier": "medium", "seconds": 17, "disk": "31M", "base_f2p_failing": 2, "f2p_total": 2, "gold_f2p_pass": 2, "gold_p2p_pass": 94, "p2p_total": 94, "gold_p2p_failing": [], "valid": true}
+{"iid": "ucfopen__canvasapi-716", "tier": "medium", "seconds": 12, "disk": "58M", "base_f2p_failing": 2, "f2p_total": 2, "gold_f2p_pass": 2, "gold_p2p_pass": 60, "p2p_total": 60, "gold_p2p_failing": [], "valid": true}
+{"iid": "pallets__click-3239", "tier": "hard", "seconds": 8, "disk": "29M", "base_f2p_failing": 4, "f2p_total": 4, "gold_f2p_pass": 4, "gold_p2p_pass": 694, "p2p_total": 694, "gold_p2p_failing": [], "valid": true}
+{"iid": "python-scim__scim2-models-139_interface", "tier": "hard", "seconds": 20, "disk": "231M", "base_f2p_failing": 9, "f2p_total": 9, "gold_f2p_pass": 9, "gold_p2p_pass": 0, "p2p_total": 0, "gold_p2p_failing": [], "valid": true}
+{"iid": "pallets-eco__wtforms-892_interface", "tier": "hard", "seconds": 8, "disk": "65M", "base_f2p_failing": 10, "f2p_total": 10, "gold_f2p_pass": 10, "gold_p2p_pass": 0, "p2p_total": 0, "gold_p2p_failing": [], "valid": true}

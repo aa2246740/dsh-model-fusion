@@ -1,0 +1,10 @@
+node_modules/
+*.tsbuildinfo
+.DS_Store
+.env
+.env.*
+.dshx/
+.dsh-model-fusion/
+coverage/
+dist/
+__pycache__/

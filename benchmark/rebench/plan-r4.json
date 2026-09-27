@@ -1,0 +1,26 @@
+{
+  "_note": "Round 4: which Sidekick gives frontier quality at a discount; see docs/REBENCH_ROUND4.md.",
+  "conditions": {
+    "XG_fusion_grok": {
+      "provider": "dsh-model-fusion", "model": "auto",
+      "pair": {
+        "lead": { "provider": "pi-openai-codex", "model": "gpt-6-astra", "reasoningEffort": "high" },
+        "worker": { "provider": "pi-xai", "model": "grok-4.6", "reasoningEffort": "high" }
+      }
+    },
+    "XF_fusion_flash": {
+      "provider": "dsh-model-fusion", "model": "auto",
+      "pair": {
+        "lead": { "provider": "pi-openai-codex", "model": "gpt-6-astra", "reasoningEffort": "high" },
+        "worker": { "provider": "pi-zai-coding-cn", "model": "glm-5.3-flash", "reasoningEffort": "high" }
+      }
+    },
+    "X_astra_only": { "provider": "pi-openai-codex", "model": "gpt-6-astra", "effort": "high" }
+  },
+  "reps": 2,
+  "prices": {
+    "gpt-6-astra": [10, 1, 50],
+    "grok-4.6": [2, 0.3, 6],
+    "glm-5.3-flash": [0.15, 0.03, 0.50]
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "id": "fusion-auto",
+  "version": "0.1.0-experimental",
+  "enabled": false,
+  "quality": "experimental",
+  "_instruction": "Developer template only. Resolve exact authorized DSH routes; do not enable blindly.",
+  "lead": {
+    "provider": "__AUTHORIZED_PROVIDER__",
+    "model": "__EXACT_MODEL_ID__"
+  },
+  "worker": {
+    "provider": "__AUTHORIZED_PROVIDER__",
+    "model": "__EXACT_WORKER_ID__"
+  },
+  "workerUpgradePath": [],
+  "dataPolicyId": "__EXISTING_PROJECT_POLICY__",
+  "context": {
+    "lead": {
+      "targetInputTokens": 32000,
+      "reserveOutputTokens": 8000,
+      "minSafetyTokens": 2048,
+      "safetyFraction": 0.05,
+      "compactToFraction": 0.5,
+      "evidenceReadTokens": 4000,
+      "maxToolVisibleTokens": 6000
+    },
+    "worker": {
+      "targetInputTokens": 96000,
+      "reserveOutputTokens": 8000,
+      "minSafetyTokens": 2048,
+      "safetyFraction": 0.05,
+      "compactToFraction": 0.55,
+      "evidenceReadTokens": 8000,
+      "maxToolVisibleTokens": 8000
+    }
+  },
+  "limits": {
+    "maxReworkRounds": 2,
+    "maxCapabilityUpgrades": 1,
+    "approvalTimeout": null
+  },
+  "evidenceCampaignIds": [],
+  "_build_step": "Fill promptDigests and canonical profile digest from actual files before use; examples are not final PairProfile objects."
+}

@@ -1,0 +1,20 @@
+{
+  "_note": "Round 3: frontier Lead (GPT-6 Astra high) + GLM-5.3-Flash high on the nine round-1 tasks; see docs/REBENCH_ROUND3.md.",
+  "conditions": {
+    "XF_fusion": {
+      "provider": "dsh-model-fusion", "model": "auto",
+      "pair": {
+        "lead": { "provider": "pi-openai-codex", "model": "gpt-6-astra", "reasoningEffort": "high" },
+        "worker": { "provider": "pi-zai-coding-cn", "model": "glm-5.3-flash", "reasoningEffort": "high" }
+      }
+    },
+    "X_astra_only": { "provider": "pi-openai-codex", "model": "gpt-6-astra", "effort": "high" },
+    "F_flash_only": { "provider": "pi-zai-coding-cn", "model": "glm-5.3-flash", "effort": "high" }
+  },
+  "reps": 1,
+  "prices": {
+    "gpt-6-astra": [10, 1, 50],
+    "glm-5.3": [1.40, 0.26, 4.40],
+    "glm-5.3-flash": [0.15, 0.03, 0.50]
+  }
+}

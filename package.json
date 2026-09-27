@@ -1,0 +1,108 @@
+{
+  "name": "dsh-model-fusion",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Fusion for DeepSeek Harness: one model entry backed by a frontier Lead that reads, briefs and reviews, and a much cheaper Sidekick that writes the code.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aa2246740/dsh-model-fusion.git"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "fusion"
+  ],
+  "type": "module",
+  "files": [
+    "lib",
+    "src",
+    "prompts",
+    "contracts",
+    "profiles",
+    "dshx.yml",
+    "cordis.patch.yml",
+    "README.md",
+    "README.en.md",
+    "INSTALL.md",
+    "INSTALL.zh.md",
+    "LICENSE",
+    "docs/COMPATIBILITY.md",
+    "docs/EVIDENCE.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./lib/types/dsh-model-fusion.d.ts",
+      "import": "./lib/dsh-model-fusion.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "import": "./lib/client.js",
+      "default": "./lib/client.js"
+    },
+    "./contracts": "./contracts/fusion.ts",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-model-selection",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-tool"
+      ]
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "typescript": "^5.9.2",
+    "vitest": "^4.1.8",
+    "@types/react": "~18.3.1"
+  },
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/schemastery": "^3.18.4",
+    "@deepseek-ai/dsh-agent": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-llm": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-session": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-session-query": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-subagent": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-tools": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-api-session-controller": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-commands": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-host-webserver": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-locale": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-settings": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.7-rc.2",
+    "react": "^18.2.0",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-model-selection": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-tool": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-store": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-agent-default-model": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-token-meter": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-compaction": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-user-approval": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-jobs": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-agent-preset-registry": "0.1.7-rc.2"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "link:host": "node scripts/link-host.mjs",
+    "test:host": "vitest run --config vitest.host.config.mts"
+  }
+}
