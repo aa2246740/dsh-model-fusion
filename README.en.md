@@ -70,7 +70,7 @@ While the Lead waits for the Sidekick, often for several minutes, the model's pr
 
 - **DSH version:** **0.1.7-rc.2** only, desktop app or Web. Other versions are not guaranteed; new releases will be adapted separately.
 - **Models:** DSH's built-in providers, plus the subscription routes of [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login) and dsh-antigravity-oauth. Other third-party model plugins are untested.
-- **Operating systems:** verified on macOS (Seatbelt) and Linux (bubblewrap / Landlock). **Windows is not verified. Check it yourself first:**
+- **Operating systems:** verified on macOS (Seatbelt) only. **Linux and Windows are not verified. Check it yourself first:**
   1. In a test folder, select Fusion and say: "This is a read-only sandbox test; a refusal is expected. Call the bash tool yourself with `echo test > fusion-probe.txt` (don't delegate, don't rewrite it) and paste the tool's raw output."
   2. Expected: the tool output says the sandbox denied it (for example `Operation not permitted` / `read-only`), and no `fusion-probe.txt` appears.
      - If the Lead only declines in words without calling the tool, the check doesn't count; ask it again to actually call the tool.
@@ -88,7 +88,7 @@ While the Lead waits for the Sidekick, often for several minutes, the model's pr
 - **Slower than the frontier model alone:** GPT-6 + Flash took about 5× the time of GPT-6 alone, mostly spent in the Sidekick. A faster Sidekick helps.
 - **Lead takeover:** never triggered in 72 measured runs; only automated tests cover it.
 - **PATH in the macOS desktop app:** DSH Studio opened from the Dock gets only the system PATH, so `node`, `npm`, `cargo` and other tools installed by Homebrew (`/opt/homebrew/bin`), nvm and similar are not found by the shell. This is DSH's environment and affects every model. Before handing off work, Fusion checks the programs the acceptance commands use; when one is missing it tells the Lead where it is installed (for example `/opt/homebrew/bin/node`), and the Lead retries with the full path.
-- **Windows:** see Operating systems above.
+- **Linux / Windows:** see Operating systems above.
 
 ## Development
 

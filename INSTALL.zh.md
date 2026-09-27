@@ -29,7 +29,7 @@ dsh plugin --profile web add github:aa2246740/dsh-model-fusion#v0.2.0
    [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login) 的订阅登录线路也可以用。
 2. 打开 **设置 → Fusion**，选择 Lead 和 Sidekick，保存。
 3. 在模型菜单里选择 **Fusion · 自动**。
-4. Windows 用户正式使用前，先按 [README.md](README.md#支持范围) 里的步骤检查只读限制是否生效。
+4. Linux / Windows 用户正式使用前，先按 [README.md](README.md#支持范围) 里的步骤检查只读限制是否生效。
 
 ## 卸载
 

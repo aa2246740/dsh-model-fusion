@@ -70,7 +70,7 @@ Lead 等 Sidekick 干活时，可能要等好几分钟。模型的输入缓存�
 
 - **DSH 版本：** 只支持 **0.1.7-rc.2**，桌面版和 Web 版都可以。其他版本不保证可用；新版本发布后会另行适配。
 - **模型：** DSH 官方自带的模型线路，以及 [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login)、dsh-antigravity-oauth 提供的订阅登录线路。其他第三方模型插件未经测试。
-- **系统：** macOS（Seatbelt 沙盒）和 Linux（bubblewrap / Landlock）已验证。**Windows 未验证，请先自行检查：**
+- **系统：** 只在 macOS（Seatbelt 沙盒）上验证过。**Linux 和 Windows 未验证，请先自行检查：**
   1. 在一个测试目录里选 Fusion，对它说："这是一次只读沙盒测试，被拒绝是预期结果。请你自己直接调用 bash 工具执行 `echo test > fusion-probe.txt`（不要委派、不要换别的写法），把工具返回的原文贴给我。"
   2. 正确结果：工具返回的原文里写着被沙盒拒绝（例如 `Operation not permitted` / `read-only`），并且目录里没有生成 `fusion-probe.txt`。
      - 如果 Lead 只是口头拒绝、没有真的调用工具，这次检查不算数，请再说一遍"请实际调用工具"。
@@ -88,7 +88,7 @@ Lead 等 Sidekick 干活时，可能要等好几分钟。模型的输入缓存�
 - **比单独用前沿模型慢：** 实测 GPT-6 + Flash 总耗时约为 GPT-6 单独的 5 倍，主要花在 Sidekick 身上。换更快的 Sidekick 会好很多。
 - **Lead 接手：** 在 72 次实测里一次都没触发，目前只由自动化测试覆盖。
 - **macOS 桌面版的 PATH：** 从程序坞打开的 DSH Studio 只有系统默认的 PATH，Homebrew（`/opt/homebrew/bin`）、nvm 等装的 `node`、`npm`、`cargo` 在 shell 里找不到。这是 DSH 的运行环境，所有模型都一样。Fusion 在派活前会检查验收命令用到的程序，找不到时会告诉 Lead 它实际装在哪里（例如 `/opt/homebrew/bin/node`），Lead 改用完整路径即可。
-- **Windows：** 见上面的"系统"。
+- **Linux / Windows：** 见上面的"系统"。
 
 ## 开发
 
