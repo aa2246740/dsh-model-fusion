@@ -68,7 +68,7 @@ While the Lead waits for the Sidekick, often for several minutes, the model's pr
 
 ## Support
 
-- **DSH version:** **0.1.7-rc.2** only, desktop app or Web. Other versions are not guaranteed; new releases will be adapted separately.
+- **DSH version:** **0.2.0-rc.1** only (`@deepseek-ai/dsh-*` peers `>=0.2.0-rc.1 <0.2.1`), desktop app or Web. Other versions are not guaranteed; new releases will be adapted separately.
 - **Models:** DSH's built-in providers, plus the subscription routes of [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login) and dsh-antigravity-oauth. Other third-party model plugins are untested.
 - **Operating systems:**
   - **macOS:** verified (Seatbelt sandbox).
@@ -103,9 +103,9 @@ The real PowerShell ACL test denied the Lead's `Set-Content probe.txt test` comm
 
 ```sh
 corepack pnpm@9.15.9 install --frozen-lockfile
-node scripts/link-host.mjs /path/to/deepseek-harness-0.1.7-rc.2   # link DSH sources for development
-DSHX_HARNESS=/path/to/deepseek-harness-0.1.7-rc.2 pnpm build
-pnpm test && DSHX_HARNESS=/path/to/deepseek-harness-0.1.7-rc.2 pnpm test:host
+node scripts/link-host.mjs /path/to/deepseek-harness-0.2.0-rc.1   # link DSH sources for development
+DSHX_HARNESS=/path/to/deepseek-harness-0.2.0-rc.1 pnpm build
+pnpm test && DSHX_HARNESS=/path/to/deepseek-harness-0.2.0-rc.1 pnpm test:host
 ```
 
 For Windows development, put PowerShell 7 (`pwsh`), Node and Python on the test process PATH. Native tests use `DSHX_HARNESS` to read the built, pinned Host checkout; no Host source changes are required.

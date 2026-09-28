@@ -1,8 +1,12 @@
 # DSH compatibility
 
-Fusion supports exactly **DeepSeek Harness 0.1.7-rc.2**. It is an ordinary external plugin: it uses only DSH's public
-plugin APIs and never patches, replaces or rebuilds DSH itself. `scripts/build.mjs` refuses to build against another
-Host version, and the `peerDependencies` pin the same release.
+Fusion supports official **DeepSeek Harness 0.2.0-rc.1** (`dsh-v0.2.0-rc.1`, SHA
+`4878cdabd87d4041bdaff61d04c966883b9fd07a`, npm `@deepseek-ai/dsh@0.2.0-rc.1`). It is an ordinary external plugin: it
+uses only DSH's public plugin APIs and never patches, replaces or rebuilds DSH itself. `scripts/build.mjs` refuses to
+build unless the Host checkout's `@deepseek-ai/dsh-agent` is exactly `0.2.0-rc.1`. The `@deepseek-ai/dsh-*`
+`peerDependencies` and `devDependencies` use `>=0.2.0-rc.1 <0.2.1`: that range accepts `0.2.0-rc.1` and stable `0.2.0`,
+rejects `0.2.0` alphas, and rejects `0.1.7-rc.2`. Cordis stays `^4.0.4`, schemastery stays `^3.18.4`, and React stays
+`^18.2.0` / `^18.3.1`.
 
 ## What Fusion depends on
 
@@ -40,10 +44,10 @@ sandbox) and stores its own records in its plugin directory.
 - Session logs are `session.v4.jsonl.zstd` (benchmark tooling reads v3 and v4).
 - Plugins declare a bundle patch (`dsh.bundle.patch` → `cordis.patch.yml`).
 
-## Adapting to a new DSH release (for example 0.1.8)
+## Adapting to a new DSH release (for example 0.2.1)
 
 1. Check out the new Harness release and point `DSHX_HARNESS` at it.
-2. Update the version check in `scripts/build.mjs` and the `@deepseek-ai/*` `peerDependencies`; relink with
+2. Update the version check in `scripts/build.mjs` and the `@deepseek-ai/dsh-*` `peerDependencies`; relink with
    `node scripts/link-host.mjs <harness>`.
 3. Read the release notes and run `dshx check` for compatibility rules; fix type errors (`pnpm typecheck`).
 4. Run `pnpm test` and `pnpm test:host` against the new Harness; the Host suite exercises the real Agent, session,

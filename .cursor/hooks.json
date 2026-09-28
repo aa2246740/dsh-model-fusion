@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "hooks": {
+    "subagentStart": [
+      { "command": ".cursor/hooks/block-other-models.sh" }
+    ]
+  }
+}
