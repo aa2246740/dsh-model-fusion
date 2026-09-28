@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 
-interface Receipt { pid: number; taskId: string; point: string; childId?: string; command?: { pid: number; pgid: number } }
+const windows = process.platform === 'win32'
+const phaseDeadline = windows ? 60_000 : 30_000
+const termination = windows ? { method: 'taskkill /PID /F' } : { signal: 'SIGKILL' }
+
+interface Receipt { pid: number; taskId: string; point: string; childId?: string; command?: { pid: number; pgid: number | null } }
 
 function launch(root: string, phase: string, kind: string) {
   const child = spawn(process.execPath, [resolve('node_modules/vitest/vitest.mjs'), 'run', '--config', 'vitest.crash.config.mts'], {
@@ -21,13 +25,18 @@ function launch(root: string, phase: string, kind: string) {
   })
   return { child, done, output: () => output, terminal: () => terminal,
     stop: async () => {
-      if (!terminal) process.kill(-child.pid!, 'SIGKILL')
+      if (!terminal) {
+        // Keep the owned shell/Python child alive for uncertain-effect recovery.
+        // /T would destroy that evidence by killing the entire process tree.
+        if (windows) execFileSync('taskkill', ['/PID', String(child.pid!), '/F'], { stdio: 'pipe' })
+        else process.kill(-child.pid!, 'SIGKILL')
+      }
       await done
     } }
 }
 
 async function receipt(root: string, phase: string, run: ReturnType<typeof launch>): Promise<Receipt> {
-  const path = join(root, `${phase}.json`), until = Date.now() + 30_000
+  const path = join(root, `${phase}.json`), until = Date.now() + phaseDeadline
   while (!existsSync(path)) {
     if (run.terminal() || Date.now() > until) throw new Error(`Missing ${phase} receipt: ${run.output()}`)
     await delay(50)
@@ -36,7 +45,7 @@ async function receipt(root: string, phase: string, run: ReturnType<typeof launc
 }
 
 async function terminal(run: ReturnType<typeof launch>) {
-  const until = Date.now() + 30_000
+  const until = Date.now() + phaseDeadline
   while (!run.terminal()) {
     if (Date.now() > until) throw new Error(`Recovery process did not exit: ${run.output()}`)
     await delay(50)
@@ -56,34 +65,75 @@ describe('separate native process crash recovery', () => {
       expect(stopped.pid).toBe(initial.child.pid)
       expect(stopped.point).toBe(kind)
       command = stopped.command
-      if (command) { expect(command.pid).toBeGreaterThan(1); expect(command.pgid).not.toBe(initial.child.pid) }
+      if (command) {
+        expect(command.pid).toBeGreaterThan(1)
+        expect(command.pid).not.toBe(initial.child.pid)
+        if (windows) expect(command.pgid).toBeNull()
+        else expect(command.pgid).not.toBe(initial.child.pid)
+      }
       process.kill(stopped.pid, 0) // verified live, then deliberately killed
+      // Windows: the owned command must be proven alive BEFORE the Host dies —
+      // the Job tears it down together with the Host, so a post-kill probe is
+      // meaningless.
+      if (command) process.kill(command.pid, 0)
+      const heartbeat = command ? join(root, 'project', 'heartbeat.txt') : ''
+      const heartbeatBefore = command ? readFileSync(heartbeat, 'utf8') : ''
       await initial.stop()
-      expect(await initial.done).toMatchObject({ code: null, signal: 'SIGKILL' })
+      const exit = await initial.done
+      if (windows) {
+        expect(exit.signal).toBeNull()
+        expect(exit.code).not.toBeNull()
+        expect(exit.code).not.toBe(0)
+      } else expect(exit).toEqual({ code: null, signal: 'SIGKILL' })
       expect(() => process.kill(stopped.pid, 0)).toThrow()
-      writeFileSync(join(root, 'terminated.json'), JSON.stringify({ ...stopped, signal: 'SIGKILL' }))
+      writeFileSync(join(root, 'terminated.json'), JSON.stringify({ ...stopped, ...termination }))
 
       if (command) {
-        process.kill(command.pid, 0)
-        const heartbeat = join(root, 'project', 'heartbeat.txt'), previous = readFileSync(heartbeat, 'utf8')
-        await delay(150)
-        expect(readFileSync(heartbeat, 'utf8')).not.toBe(previous)
-        const observation = launch(root, 'observe', kind)
-        runs.push(observation)
-        expect(await terminal(observation), observation.output()).toEqual({ code: 0, signal: null })
-        expect(await receipt(root, 'observe', observation)).toMatchObject({ liveCommandVerified: true, genericRecoveryRejected: true, requestCount: 0 })
-        process.kill(command.pid, 'SIGTERM')
-        const deadline = Date.now() + 5000
-        for (;;) {
-          try { process.kill(command.pid, 0) } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'ESRCH') break
-            throw error
+        const previous = heartbeatBefore
+        if (windows) {
+          // Windows owns the subprocess in a Job: Host termination stops the
+          // command with it. Verify the PID disappears and the heartbeat froze
+          // at its last write — the same "no stray execution" evidence POSIX
+          // gets from an orphaned live command.
+          const deadline = Date.now() + 15_000
+          for (;;) {
+            try { process.kill(command.pid, 0) } catch (error) {
+              if ((error as NodeJS.ErrnoException).code === 'ESRCH') break
+              throw error
+            }
+            if (Date.now() > deadline) throw new Error('Owned fixture command survived Host termination (Job teardown failed)')
+            await delay(25)
           }
-          if (Date.now() > deadline) throw new Error('The owned fixture command did not stop')
-          await delay(25)
+          await delay(150)
+          const frozen = readFileSync(heartbeat, 'utf8')
+          await delay(250)
+          expect(readFileSync(heartbeat, 'utf8')).toBe(frozen)
+          const observation = launch(root, 'observe', kind)
+          runs.push(observation)
+          expect(await terminal(observation), observation.output()).toEqual({ code: 0, signal: null })
+          expect(await receipt(root, 'observe', observation)).toMatchObject({ hostDeathStoppedCommand: true, genericRecoveryRejected: true, requestCount: 0 })
+          writeFileSync(join(root, 'command-stopped.json'), JSON.stringify({ pid: command.pid, cause: 'host-termination', oldPidAbsent: true }))
+          command = undefined // never signal this numeric PID after verified exit
+        } else {
+          await delay(150)
+          expect(readFileSync(heartbeat, 'utf8')).not.toBe(previous)
+          const observation = launch(root, 'observe', kind)
+          runs.push(observation)
+          expect(await terminal(observation), observation.output()).toEqual({ code: 0, signal: null })
+          expect(await receipt(root, 'observe', observation)).toMatchObject({ liveCommandVerified: true, genericRecoveryRejected: true, requestCount: 0 })
+          process.kill(command.pid, 'SIGTERM')
+          const deadline = Date.now() + 5000
+          for (;;) {
+            try { process.kill(command.pid, 0) } catch (error) {
+              if ((error as NodeJS.ErrnoException).code === 'ESRCH') break
+              throw error
+            }
+            if (Date.now() > deadline) throw new Error('The owned fixture command did not stop')
+            await delay(25)
+          }
+          writeFileSync(join(root, 'command-stopped.json'), JSON.stringify({ pid: command.pid, signal: 'SIGTERM', oldPidAbsent: true }))
+          command = undefined // never signal this numeric PID after verified exit
         }
-        writeFileSync(join(root, 'command-stopped.json'), JSON.stringify({ pid: command.pid, signal: 'SIGTERM', oldPidAbsent: true }))
-        command = undefined // never signal this numeric PID after verified exit
       }
 
       if (kind === 'compaction') {
@@ -106,7 +156,7 @@ describe('separate native process crash recovery', () => {
         mkdirSync(evidence, { recursive: true })
         writeFileSync(join(evidence, `${kind}.json`), JSON.stringify({ schemaVersion: 1,
           classification: 'native-scripted-separate-process-crash', observedAt: new Date().toISOString(),
-          crash: stopped, termination: { signal: 'SIGKILL', oldPidAbsent: true },
+          crash: stopped, termination: { ...termination, oldPidAbsent: true },
           inspection: existsSync(join(root, 'inspect.json')) ? JSON.parse(readFileSync(join(root, 'inspect.json'), 'utf8')) : null,
           liveCommandObservation: existsSync(join(root, 'observe.json')) ? JSON.parse(readFileSync(join(root, 'observe.json'), 'utf8')) : null,
           stoppedCommand: existsSync(join(root, 'command-stopped.json')) ? JSON.parse(readFileSync(join(root, 'command-stopped.json'), 'utf8')) : null,
@@ -121,5 +171,5 @@ describe('separate native process crash recovery', () => {
       }
       rmSync(root, { recursive: true, force: true })
     }
-  }, 60_000)
+  }, windows ? 180_000 : 60_000)
 })

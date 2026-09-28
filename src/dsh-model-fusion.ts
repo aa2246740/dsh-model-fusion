@@ -24,13 +24,14 @@ import { authorizeConfiguredPair, NativeRequestBudget } from './host/native-budg
 import { json, readJson, trustedRequest } from './host/http.js'
 import { readFusionStatus } from './host/status.js'
 import { readHistoricalFusionActivity } from './host/native-activity.js'
+import { nativeShellTool } from './host/shell.js'
 
 export * from './index.js'
 
 export const name = 'dsh-model-fusion'
 export const inject = ['agents', 'sessions', 'llm', 'tools', 'subagents', 'systemPrompt', 'webServer', 'sessionController', 'sessionQuery', 'commands', 'agentDefaultModel', 'tokenMeter']
 export interface Config { profilePath?: string; authorizationPath?: string; databasePath?: string; workerTools?: string[] }
-const defaultWorkerTools = ['bash', 'read', 'write', 'edit', 'glob', 'grep', 'job_output', 'job_kill']
+const defaultWorkerTools = [nativeShellTool, 'read', 'write', 'edit', 'glob', 'grep', 'job_output', 'job_kill']
 // Schemastery otherwise normalizes an omitted array to [], bypassing ?? below.
 // An explicitly empty list must remain empty, so the default belongs in the schema.
 export const Config: z<Config> = z.object({ profilePath: z.string(), authorizationPath: z.string(), databasePath: z.string(),

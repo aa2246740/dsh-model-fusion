@@ -72,13 +72,19 @@ Lead 等 Sidekick 干活时，可能要等好几分钟。模型的输入缓存�
 - **模型：** DSH 官方自带的模型线路，以及 [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login)、dsh-antigravity-oauth 提供的订阅登录线路。其他第三方模型插件未经测试。
 - **系统：**
   - **macOS：** 已验证（Seatbelt 沙盒）。
-  - **Windows：** 暂不支持。DSH 在 Windows 上只提供 PowerShell，不提供 bash，而 Fusion 的 Sidekick 和验收命令目前都依赖 bash。
+  - **Windows：** `v0.2.1` 已适配原生 `pwsh`，在 Windows Server 2022、PowerShell 7.6.6 上通过验证。启动 DSH 的进程 PATH 中需要有 `pwsh`。Windows 10/11 尚未验证。Windows ACL 仅提供部分隔离，普通路径写入可受限制，读取和网络不在该限制内。
   - **Linux：** 未验证，使用前请先自行检查：
   1. 在一个测试目录里选 Fusion，对它说："这是一次只读沙盒测试，被拒绝是预期结果。请你自己直接调用 bash 工具执行 `echo test > fusion-probe.txt`（不要委派、不要换别的写法），把工具返回的原文贴给我。"
   2. 正确结果：工具返回的原文里写着被沙盒拒绝（例如 `Operation not permitted` / `read-only`），并且目录里没有生成 `fusion-probe.txt`。
      - 如果 Lead 只是口头拒绝、没有真的调用工具，这次检查不算数，请再说一遍"请实际调用工具"。
   3. 如果文件被创建出来，说明你的系统上 Lead 的只读限制没有生效，请不要使用，并反馈给我们。
   - 如果 DSH 在你的系统上没有沙盒，Lead 的 shell 命令会被全部拒绝（安全的失败方式），它仍然可以用读文件和搜索工具看代码。
+
+### v0.2.1 的 Windows 验证
+
+在 Windows Server 2022、Node 22.23.3、PowerShell 7.6.6、DSH 0.1.7-rc.2 上，**253 项单元测试和 236 项 Host 测试全部通过**，类型检查通过。修复候选完成了插件安装、冷启动、Fusion 设置页及 settings/cache 两个 API 验证。v0.2.1 的服务端和客户端构建文件与该候选完全一致。
+
+真实 PowerShell ACL 测试中，Lead 执行 `Set-Content probe.txt test` 被拒绝，文件未生成；Sidekick 在获准的工作区内执行同一命令可以写入。这是上面所述的部分 ACL 隔离。验证没有输入模型密钥或发起真实模型请求。macOS 回归通过 253 项单元测试和 235 项 Host 测试，按设计跳过 Windows 专用 ACL 测试。
 
 ## 数据存在哪里
 
@@ -91,16 +97,18 @@ Lead 等 Sidekick 干活时，可能要等好几分钟。模型的输入缓存�
 - **比单独用前沿模型慢：** 实测 GPT-6 + Flash 总耗时约为 GPT-6 单独的 5 倍，主要花在 Sidekick 身上。换更快的 Sidekick 会好很多。
 - **Lead 接手：** 在 72 次实测里一次都没触发，目前只由自动化测试覆盖。
 - **macOS 桌面版的 PATH：** 从程序坞打开的 DSH Studio 只有系统默认的 PATH，Homebrew（`/opt/homebrew/bin`）、nvm 等装的 `node`、`npm`、`cargo` 在 shell 里找不到。这是 DSH 的运行环境，所有模型都一样。Fusion 在派活前会检查验收命令用到的程序，找不到时会告诉 Lead 它实际装在哪里（例如 `/opt/homebrew/bin/node`），Lead 改用完整路径即可。
-- **Windows 暂不支持，Linux 未验证：** 见上面的"系统"。
+- **Windows 10/11 和 Linux 未验证：** 见上面的"系统"。
 
 ## 开发
 
 ```sh
-pnpm install
+corepack pnpm@9.15.9 install --frozen-lockfile
 node scripts/link-host.mjs /path/to/deepseek-harness-0.1.7-rc.2   # 开发时链接 DSH 源码
 DSHX_HARNESS=/path/to/deepseek-harness-0.1.7-rc.2 pnpm build
 pnpm test && DSHX_HARNESS=/path/to/deepseek-harness-0.1.7-rc.2 pnpm test:host
 ```
+
+Windows 开发环境需将 PowerShell 7（`pwsh`）、Node 和 Python 加入运行测试的进程 PATH。原生测试通过 `DSHX_HARNESS` 读取已构建的指定 Host；不需要修改 Host 源码。
 
 插件只使用 DSH 公开的插件接口，不修改 DSH 源码。适配新版本 DSH 的做法见 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)。
 

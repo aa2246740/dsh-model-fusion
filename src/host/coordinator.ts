@@ -21,7 +21,7 @@ import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import type { TaskState } from '../task/state.js'
 import { BindingRepository } from './bindings.js'
 import type { SessionBinding } from './bindings.js'
-import { BASELINE_PARSERS, MAX_CHECK_SECONDS, TEST_PARSERS, checkPrograms, freezeChecks, probeMissingPrograms, runBaselineChecks, runNativeChecks } from './native-checks.js'
+import { BASELINE_PARSERS, MAX_CHECK_SECONDS, TEST_PARSERS, checkCommandUnavailable, checkPrograms, freezeChecks, probeMissingPrograms, runBaselineChecks, runNativeChecks } from './native-checks.js'
 import type { CheckDefinition, FrozenCheck } from './native-checks.js'
 import { captureNativeReviewRequest, nativeReviewProof } from './native-review.js'
 import { NativeFusionScopes } from './native-scopes.js'
@@ -34,6 +34,7 @@ import { NativeOnDemandContext } from './native-on-demand-context.js'
 import { NativeTaskContext } from './native-task-context.js'
 import { NativeApprovals } from './native-approvals.js'
 import { NativeEffects } from './native-effects.js'
+import { isShellTool, nativeShellTool } from './shell.js'
 import { observeNativeUsage } from './native-usage.js'
 import { NativeAuxiliaryRequests } from './native-auxiliary.js'
 import { NativeCacheKeepalive } from './native-keepalive.js'
@@ -140,10 +141,13 @@ export function directWriteLines(exec: Readonly<ToolExecution>): number {
   if (exec.name === 'write') return lineCount(args.content)
   if (exec.name === 'edit') return lineCount(args.new_string)
   if (exec.name === 'str_replace_editor') return lineCount(args.file_text) || lineCount(args.new_str)
-  if (exec.name === 'bash' && typeof args.command === 'string') {
-    // Heredocs and redirected multi-line scripts are file writing by another name.
-    const writes = /<<-?\s*['"]?\w+/.test(args.command) || (/(^|[^>&0-9])>{1,2}\s*[^\s&|]/.test(args.command) && args.command.includes('\n'))
-    return writes ? lineCount(args.command) : 0
+  if (isShellTool(exec.name) && typeof args.command === 'string') {
+    // Heredocs/here-strings and redirected multi-line scripts are file writing by another name;
+    // pwsh write cmdlets (Set-Content/Out-File/...) count at least the command itself.
+    const writes = /<<-?\s*['"]?\w+/.test(args.command) || /[@]["']\s*\r?\n/.test(args.command)
+      || (/(^|[^>&0-9])>{1,2}\s*[^\s&|]/.test(args.command) && args.command.includes('\n'))
+      || /\b(Set-Content|Add-Content|Out-File|Tee-Object)\b/i.test(args.command)
+    return writes ? Math.max(1, lineCount(args.command)) : 0
   }
   return 0
 }
@@ -168,7 +172,7 @@ export const normalizeQuote = (text: string) => text.replace(/\s+/g, ' ').trim()
 export const literalSpans = (text: string) => [...new Set([...text.matchAll(/`([^`\n]{2,120})`/g)].map(match => match[1]!))]
 
 /** The enforced-v3 Lead's fixed catalog (order is part of the cached prompt prefix). */
-const SEPARATED_LEAD_TOOLS: readonly string[] = [...new Set([...READ_TOOLS, 'bash', ...[...FUSION_TOOLS].filter(name =>
+const SEPARATED_LEAD_TOOLS: readonly string[] = [...new Set([...READ_TOOLS, nativeShellTool, ...[...FUSION_TOOLS].filter(name =>
   !['fusion_takeover', 'fusion_submit_result', 'fusion_finish_direct'].includes(name))])]
 
 /** Test files by common conventions (Python, JS/TS, Go, Rust and generic test directories). */
@@ -731,7 +735,7 @@ export class FusionCoordinator {
     if (enforcedWorkflow(binding) && role === 'lead' && !isRead(exec) && !FUSION_TOOLS.has(exec.name)
       && (!adaptiveWorkflow(binding) || state.currentWorkOrder)) {
       const nested = this.#nestedChecks.get(exec.callId)
-      const check = exec.name === 'bash' && nested?.agent === exec.agent && nested.parent === exec.parent
+      const check = isShellTool(exec.name) && nested?.agent === exec.agent && nested.parent === exec.parent
       const takeover = state.currentWorkOrder && this.#runtime(binding.taskId).takeover
       if (!check && !takeover) return this.workflow.denyEffect(binding)
     }
@@ -744,7 +748,7 @@ export class FusionCoordinator {
       const root = exec.agent.session.header.cwd
       // No workspace is required for conversational or non-file native tools.
       // Filesystem/shell effects need an identified resource to coordinate.
-      if (!root && ['bash', 'write', 'edit', 'str_replace_editor'].includes(exec.name)) return 'This native file operation needs a workspace'
+      if (!root && (isShellTool(exec.name) || ['write', 'edit', 'str_replace_editor'].includes(exec.name))) return 'This native file operation needs a workspace'
       if (!root) return undefined
       this.append(binding.taskId, 'intent/chosen', { intent: 'DIRECT' })
       try { this.#acquire(binding, root, exec.agent.id, OperationId(randomUUID())) }
@@ -759,7 +763,7 @@ export class FusionCoordinator {
       try { workspacePath(lease.workspaceId, path) } catch (error) { return String(error) }
       if (state.currentWorkOrder && !pathAllowed(path, state.currentWorkOrder.allowedPaths)) return 'The edit is outside frozen allowedPaths'
     }
-    if (exec.name === 'bash') {
+    if (isShellTool(exec.name)) {
       const args = exec.arguments as { workdir?: string; run_in_background?: boolean }
       if (args.run_in_background) {
         const issue = this.effects.backgroundProblem(exec)
@@ -840,13 +844,13 @@ export class FusionCoordinator {
     }
     if (isRead(exec) || FUSION_TOOLS.has(exec.name)) return false
     const nested = this.#nestedChecks.get(exec.callId)
-    if (exec.name === 'bash' && nested && nested.agent === exec.agent && nested.parent === exec.parent) return false
-    if (exec.name === 'bash' && (exec.arguments as { run_in_background?: unknown }).run_in_background === true) {
+    if (isShellTool(exec.name) && nested && nested.agent === exec.agent && nested.parent === exec.parent) return false
+    if (isShellTool(exec.name) && (exec.arguments as { run_in_background?: unknown }).run_in_background === true) {
       this.workflow.denyEffect(binding)
       return 'FUSION_LEAD_READ_ONLY: the Lead runs only short foreground inspection commands. Test runs and long commands belong to the Sidekick: delegate them.'
     }
-    const shell = exec.name === 'bash' ? this.roleSandbox.leadShellProblem(exec) : undefined
-    if (exec.name === 'bash' && !shell) return undefined
+    const shell = isShellTool(exec.name) ? this.roleSandbox.leadShellProblem(exec) : undefined
+    if (isShellTool(exec.name) && !shell) return undefined
     // Record the refusal so a text-only answer cannot mark undelegated work complete.
     this.workflow.denyEffect(binding)
     if (shell) return shell
@@ -1378,8 +1382,10 @@ export class FusionCoordinator {
     const ticket = persistReviewRequest(this.store, binding.taskId, { ticketId: randomUUID(), requestId: randomUUID() }, payload.id)
     const row = this.store.outbox(binding.taskId).find(row => row.operationId === order.operationId)!
     this.store.advanceOutbox(binding.taskId, order.operationId, row.state, 'result-recorded', { resultDigest: digestOf(checked.report) })
-    // 126/127 mean the shell could not run the command at all: no candidate change can fix it.
-    const unrunnable = checked.receipts.filter(receipt => receipt.evidence.exitCode === 126 || receipt.evidence.exitCode === 127)
+    // Keep shell setup failures out of the automatic implementation repair path.
+    const unrunnable = checked.receipts.filter(receipt => receipt.evidence.state === 'completed'
+      && checkCommandUnavailable(receipt.evidence.exitCode,
+        Buffer.from(this.store.readArtifact(binding.taskId, receipt.evidence.stderr.id)).toString('utf8')))
       .map(receipt => runtime.checks.find(check => digestOf(check.plan) === receipt.planDigest)?.definition.id).filter(Boolean)
     // Definite check failures need no fresh Lead generation to relay the evidence.
     // One automatic repair per work order; further failures return to Lead judgment.
@@ -1424,7 +1430,7 @@ export class FusionCoordinator {
         testWarning: 'Existing tests lost or changed original lines. Check that the change extends them rather than rewriting an old expectation to fit the new behaviour; an accept must name each file in its reason.' } : {}),
       ...(runtime.checks.length ? {} : { reviewOnly: 'No automated acceptance check ran for this work order. Your review of the diff is the only verification; say so plainly in the final answer.' }),
       ...(unrunnable.length ? { checkDefinitionProblem: {
-        checks: unrunnable, reason: 'The acceptance command could not execute on this host (exit 126/127: program not found or not executable)',
+        checks: unrunnable, reason: 'The acceptance command could not execute on this host (program not found or not executable)',
         next: 'This is not a code defect. After recording the review, correct the command with fusion_rework checks, keeping every protected definition path.' } } : {}),
       next: 'Inspect relevant changes and evidence. Record fusion_review_result; use fusion_rework for corrections.' })
   }
@@ -1502,6 +1508,9 @@ export class FusionCoordinator {
     }
     if (this.state(binding.taskId).control.mode !== 'paused') this.append(binding.taskId, 'task/paused', { reason: 'User paused Fusion' })
     await auxiliaryStopped
+    // Stopping a continuable child can wake its parent with a settlement
+    // notice. Drain that wake under the paused gate before returning control.
+    await agent.whenIdle()
     await this.activity.flush()
   }
 
@@ -1510,6 +1519,7 @@ export class FusionCoordinator {
     if (!binding?.selected) throw new Error('Fusion is not selected')
     await this.keepalive.stopTask(binding.taskId, 'resume')
     await this.#backgroundStops.get(binding.taskId)
+    await agent.whenIdle()
     await agent.runMaintenance(async () => {
       const state = this.state(binding.taskId)
       if (this.#trackingErrors.has(binding.taskId) || state.control.recovering || state.control.outcomeUnknown) throw new Error('Review the interrupted effects and use /fusion recover <inspection note>')
@@ -1535,6 +1545,7 @@ export class FusionCoordinator {
     if (!binding?.selected || inspection.note.trim().length < 12 || !inspection.commandId) throw new Error('Record what interrupted file/process effects you inspected; no automatic replay is performed')
     await this.keepalive.stopTask(binding.taskId, 'reconcile')
     await this.#backgroundStops.get(binding.taskId)
+    await agent.whenIdle()
     await agent.runMaintenance(async () => {
       const state = this.state(binding.taskId)
       this.effects.assertInspection(binding.taskId, inspection.effectsStopped === true)
@@ -1754,6 +1765,8 @@ export class FusionCoordinator {
       await this.#stopJobs(binding.taskId)
       if (child) { await this.transport.release(parent, child.id); this.scopes.detach(child) }
       if (!this.effects.pending(binding.taskId).length) this.#release(binding.taskId)
+      // Releasing the child may have queued a final native settlement notice.
+      await parent.whenIdle()
       this.scopes.detach(parent)
     }
     await Promise.all(this.#backgroundStops.values())

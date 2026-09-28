@@ -5,6 +5,7 @@ import { digestOf } from '../digest.js'
 import type { Role } from '../contracts.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import type { SessionBinding } from './bindings.js'
+import { isShellTool } from './shell.js'
 
 export const enforcedWorkflow = (binding: SessionBinding) => binding.profile.workflowPolicy === 'enforced-v1' || binding.profile.workflowPolicy === 'enforced-v2' || binding.profile.workflowPolicy === 'enforced-v3'
 /** v3 keeps every v2 mechanism and adds role separation (see native-role-sandbox). */
@@ -52,7 +53,7 @@ export class NativeWorkflow {
     // Required recovery pagination and a live job wait must neither spend nor erase the window.
     if (exec.name === 'fusion_read_state' || exec.name === 'job_output') return false
     const id = `workflow-progress:${binding.taskId}:${exec.agent!.id}`, row = this.store.readDocument(id)
-    const shell = exec.name === 'bash' && !result.isError ? result.value as { exitCode?: unknown } : undefined
+    const shell = isShellTool(exec.name) && !result.isError ? result.value as { exitCode?: unknown } : undefined
     const failed = result.isError || typeof shell?.exitCode === 'number' && shell.exitCode !== 0
     const args = exec.arguments as { file_path?: string; path?: string; limit?: number }
     const fingerprint = failed || read || exec.name.startsWith('fusion_')

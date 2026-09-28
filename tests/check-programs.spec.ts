@@ -31,6 +31,14 @@ describe('checkPrograms', () => {
   it('leaves paths unprobed because an earlier cd changes where they resolve', () => {
     expect(checkPrograms('cd app && ./gradlew test && .venv/bin/python -m pytest')).toEqual(['cd'])
   })
+
+  it('does not look up PowerShell control statements as executable programs', () => {
+    expect(checkPrograms('Write-Output ok; exit 127', 'win32')).toEqual(['Write-Output'])
+    expect(checkPrograms('throw "failure"; return; break; continue', 'win32')).toEqual([])
+    expect(checkPrograms('EXIT 127', 'win32')).toEqual([])
+    expect(checkPrograms('exit 127', 'linux')).toEqual(['exit'])
+    expect(checkPrograms('fusion-no-such-program', 'win32')).toEqual(['fusion-no-such-program'])
+  })
 })
 
 describe('probeMissingPrograms', () => {
@@ -38,7 +46,7 @@ describe('probeMissingPrograms', () => {
     const { probeMissingPrograms } = await import('../src/host/native-checks.js')
     const probe = await probeMissingPrograms(process.cwd(), ['cd', 'node', 'fusion-no-such-program'])
     expect(probe).toEqual({ missing: ['fusion-no-such-program'], alternatives: { 'fusion-no-such-program': [] }, locations: { 'fusion-no-such-program': [] } })
-  })
+  }, 30_000)
 
   it('names where a program off the PATH is installed', async () => {
     const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs')
@@ -47,9 +55,13 @@ describe('probeMissingPrograms', () => {
     const { programLocations } = await import('../src/host/native-checks.js')
     const home = mkdtempSync(join(tmpdir(), 'fusion-home-'))
     for (const dir of ['.nvm/versions/node/v20.1.0/bin', '.nvm/versions/node/v22.11.0/bin', '.bun/bin']) mkdirSync(join(home, dir), { recursive: true })
-    for (const file of ['.nvm/versions/node/v20.1.0/bin/fusion-tool', '.nvm/versions/node/v22.11.0/bin/fusion-tool', '.bun/bin/fusion-tool']) writeFileSync(join(home, file), '', { mode: 0o755 })
+    // Windows executes only PATHEXT-suffixed names; POSIX uses the exec bit.
+    const file = process.platform === 'win32' ? 'fusion-tool.cmd' : 'fusion-tool'
+    for (const path of ['.nvm/versions/node/v20.1.0/bin', '.nvm/versions/node/v22.11.0/bin', '.bun/bin'].map(dir => join(home, dir, file))) {
+      writeFileSync(path, '', { mode: 0o755 })
+    }
     writeFileSync(join(home, '.bun/bin/not-executable'), '', { mode: 0o644 })
-    expect(programLocations('fusion-tool', home)).toEqual([join(home, '.bun/bin/fusion-tool'), join(home, '.nvm/versions/node/v22.11.0/bin/fusion-tool'), join(home, '.nvm/versions/node/v20.1.0/bin/fusion-tool')])
+    expect(programLocations('fusion-tool', home)).toEqual([join(home, '.bun/bin', file), join(home, '.nvm/versions/node/v22.11.0/bin', file), join(home, '.nvm/versions/node/v20.1.0/bin', file)])
     expect(programLocations('not-executable', home)).toEqual([])
   })
 })

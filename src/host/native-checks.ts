@@ -15,6 +15,7 @@ import type { CheckPlan, PlannedReceipt } from '../evidence/receipts.js'
 import { assertPlannedCheck, memoryVerificationRegistry } from '../evidence/receipts.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import { snapshotWorkspace, workspacePath } from './workspace.js'
+import { nativeShellTool } from './shell.js'
 
 export interface CheckDefinition {
   id: string
@@ -39,6 +40,19 @@ export const TEST_PARSERS = ['unittest', 'pytest', 'vitest', 'jest', 'mocha', 't
 export type TestParser = typeof TEST_PARSERS[number]
 export const MAX_CHECK_SECONDS = 3_600
 export interface FrozenCheck { definition: CheckDefinition; plan: CheckPlan }
+
+/** Shell setup failures need a corrected check, rather than an implementation repair. */
+export function checkCommandUnavailable(exitCode: number | null, stderr: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (exitCode === null || exitCode === 0) return false
+  if (exitCode === 126 || exitCode === 127) return true
+  if (platform !== 'win32') return false
+  // PowerShell normally returns 1 for CommandNotFoundException. Its concise
+  // error view omits the exception id, so also recognize its specific message.
+  // A generic exit 1 or a missing data file must remain a normal check failure.
+  const text = stderr.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+/g, ' ')
+  return /\bCommandNotFoundException\b/.test(text)
+    || /\bThe term ['"][^'"]+['"] is not recognized as (?:the |a )?name of a cmdlet, function, script file, or (?:executable|operable) program\b/i.test(text)
+}
 
 function definitionDigest(root: string, definition: CheckDefinition) {
   return digestOf({ definition, files: definition.definitionPaths.map(path => ({ path, digest: sha256Hex(readFileSync(workspacePath(root, path))) })) })
@@ -148,13 +162,18 @@ const execFileAsync = promisify(execFile)
 const WRAPPERS = new Set(['env', 'exec', 'time', 'nohup', 'command', 'nice'])
 const WRAPPER_VALUE_OPTIONS: Record<string, string[]> = { env: ['-u', '--unset', '-C', '--chdir', '-S', '--split-string'],
   nice: ['-n', '--adjustment'], time: ['-f', '--format', '-o', '--output'] }
+// PowerShell language statements are not programs: Get-Command cannot resolve
+// them, even though the shell can execute the statement (for example exit 127).
+const PWSH_KEYWORDS = new Set(['exit', 'return', 'throw', 'break', 'continue', 'if', 'else', 'elseif', 'switch',
+  'for', 'foreach', 'while', 'do', 'until', 'try', 'catch', 'finally', 'trap', 'function', 'filter',
+  'param', 'begin', 'process', 'end', 'dynamicparam', 'class', 'enum', 'data', 'using'])
 
 /**
  * Bare program names each simple command segment starts with. Paths are left
  * out because an earlier `cd` in the same command changes where they resolve;
  * anything this cannot parse is simply not probed.
  */
-export function checkPrograms(command: string): string[] {
+export function checkPrograms(command: string, platform: NodeJS.Platform = process.platform): string[] {
   const programs = new Set<string>()
   // Quoted text is an argument (for example `python3 -c "...; sys.exit(1)"`), never a command boundary.
   // Heredoc bodies are data (hash lists, scripts fed to stdin), not commands.
@@ -176,7 +195,8 @@ export function checkPrograms(command: string): string[] {
     }
     const word = words[index]
     // A program name has a letter and is not a long hex digest or a bare number.
-    if (word && /^[A-Za-z0-9_][A-Za-z0-9_.+-]*$/.test(word) && /[A-Za-z]/.test(word) && !/^[0-9a-f]{16,}$/i.test(word)) programs.add(word)
+    if (word && /^[A-Za-z0-9_][A-Za-z0-9_.+-]*$/.test(word) && /[A-Za-z]/.test(word) && !/^[0-9a-f]{16,}$/i.test(word)
+      && !(platform === 'win32' && PWSH_KEYWORDS.has(word.toLowerCase()))) programs.add(word)
   }
   return [...programs]
 }
@@ -191,11 +211,14 @@ export function checkPrograms(command: string): string[] {
 export async function probeMissingPrograms(root: string, programs: readonly string[]): Promise<{ missing: string[]; alternatives: Record<string, string[]>; locations: Record<string, string[]> } | undefined> {
   const variants = (name: string) => [`${name}3`, ...(name === 'python' || name === 'python3' ? ['py'] : [])].filter(item => item !== name)
   const names = [...new Set(programs.flatMap(name => [name, ...variants(name)]))]
-  const script = `for p in ${names.map(name => `'${name}'`).join(' ')}; do command -v -- "$p" >/dev/null 2>&1 && printf 'FOUND %s\\n' "$p"; done; printf 'PROBE-DONE\\n'`
+  const script = process.platform === 'win32'
+    ? `foreach ($p in @(${names.map(name => `'${name}'`).join(',')})) { if (Get-Command $p -ErrorAction SilentlyContinue) { Write-Output "FOUND $p" } }; Write-Output 'PROBE-DONE'`
+    : `for p in ${names.map(name => `'${name}'`).join(' ')}; do command -v -- "$p" >/dev/null 2>&1 && printf 'FOUND %s\\n' "$p"; done; printf 'PROBE-DONE\\n'`
   const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined
     && !/KEY|PASSWORD|SECRET|TOKEN/i.test(key) && !key.toUpperCase().startsWith('DSH_'))) as Record<string, string>
+  const [shell, args] = process.platform === 'win32' ? ['pwsh', ['-NoProfile', '-NonInteractive', '-Command', script]] : ['bash', ['-c', script]]
   let text: string
-  try { text = (await execFileAsync('bash', ['-c', script], { cwd: root, env, timeout: 5_000 })).stdout }
+  try { text = (await execFileAsync(shell, args, { cwd: root, env, timeout: process.platform === 'win32' ? 15_000 : 5_000 })).stdout }
   catch { return undefined }
   if (!text.includes('PROBE-DONE')) return undefined
   const found = new Set([...text.matchAll(/^FOUND (\S+)$/gm)].map(match => match[1]!))
@@ -210,14 +233,24 @@ export async function probeMissingPrograms(root: string, programs: readonly stri
  * absolute path lets the Lead retry once instead of searching.
  */
 export function programLocations(name: string, home = homedir()): string[] {
-  const dirs = ['/opt/homebrew/bin', '/usr/local/bin', join(home, '.local/bin'), join(home, '.cargo/bin'), join(home, '.bun/bin'),
-    join(home, '.deno/bin'), join(home, '.volta/bin'), join(home, '.local/share/mise/shims'), join(home, '.asdf/shims')]
+  const windows = process.platform === 'win32'
+  const dirs = windows
+    ? [join(home, '.bun/bin'), join(home, '.deno/bin'), join(home, '.cargo/bin'),
+      join(home, 'scoop/shims'), join(home, 'AppData/Roaming/npm'), join(home, 'AppData/Local/Programs'),
+      join(home, 'AppData/Local/Microsoft/WinGet/Links')]
+    : ['/opt/homebrew/bin', '/usr/local/bin', join(home, '.local/bin'), join(home, '.cargo/bin'), join(home, '.bun/bin'),
+      join(home, '.deno/bin'), join(home, '.volta/bin'), join(home, '.local/share/mise/shims'), join(home, '.asdf/shims')]
   try {
     const nvm = join(home, '.nvm/versions/node')
     dirs.push(...readdirSync(nvm).sort((a, b) => b.localeCompare(a, undefined, { numeric: true })).map(version => join(nvm, version, 'bin')))
   } catch { /* no nvm */ }
-  return dirs.map(dir => join(dir, name)).filter(path => {
-    try { accessSync(path, constants.X_OK); return true } catch { return false }
+  // Windows resolves executables through PATHEXT — an extensionless file is not runnable; POSIX checks the exec bit.
+  const candidates = windows
+    ? (name.includes('.') ? [name] : [])
+      .concat((process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD;.PS1').split(';').map(ext => `${name}${ext.toLowerCase()}`))
+    : [name]
+  return dirs.flatMap(dir => candidates.map(file => join(dir, file))).filter(path => {
+    try { accessSync(path, windows ? constants.F_OK : constants.X_OK); return true } catch { return false }
   }).slice(0, 3)
 }
 
@@ -246,7 +279,7 @@ async function invokeCheck(input: CheckInput, check: FrozenCheck) {
   let result
   try {
     result = await ctx.tools.execute({ callId, rootCallId: exec.rootCallId, parent: exec.token,
-      name: 'bash', arguments: { command: check.definition.command, description: check.definition.description,
+      name: nativeShellTool, arguments: { command: check.definition.command, description: check.definition.description,
         workdir: root, ...(input.nativeTimeout && check.definition.timeoutSeconds === undefined ? {} : { timeoutMs: (check.definition.timeoutSeconds ?? order.policy.commandMaxSeconds) * 1000 }), run_in_background: false },
       agent: exec.agent, signal: exec.signal })
   } catch (error) {

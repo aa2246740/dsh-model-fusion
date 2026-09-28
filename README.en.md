@@ -72,13 +72,19 @@ While the Lead waits for the Sidekick, often for several minutes, the model's pr
 - **Models:** DSH's built-in providers, plus the subscription routes of [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login) and dsh-antigravity-oauth. Other third-party model plugins are untested.
 - **Operating systems:**
   - **macOS:** verified (Seatbelt sandbox).
-  - **Windows:** not supported yet. DSH provides only PowerShell on Windows, not bash, and Fusion's Sidekick and acceptance commands currently need bash.
+  - **Windows:** `v0.2.1` supports native `pwsh` and has been verified on Windows Server 2022 with PowerShell 7.6.6. Make sure `pwsh` is on the PATH used to launch DSH. Windows 10/11 remain unverified. Windows ACL enforcement is partial: it can restrict ordinary file writes, but does not restrict reads or networking.
   - **Linux:** not verified. Check it yourself first:
   1. In a test folder, select Fusion and say: "This is a read-only sandbox test; a refusal is expected. Call the bash tool yourself with `echo test > fusion-probe.txt` (don't delegate, don't rewrite it) and paste the tool's raw output."
   2. Expected: the tool output says the sandbox denied it (for example `Operation not permitted` / `read-only`), and no `fusion-probe.txt` appears.
      - If the Lead only declines in words without calling the tool, the check doesn't count; ask it again to actually call the tool.
   3. If the file is created, the Lead's read-only limit does not work on your system. Don't use Fusion there, and please report it.
   - Where DSH has no sandbox at all, every Lead shell command is refused (it fails safe). The Lead still reads code with its file and search tools.
+
+### Windows validation in v0.2.1
+
+On Windows Server 2022 with Node 22.23.3, PowerShell 7.6.6 and DSH 0.1.7-rc.2, all **253 unit tests and 236 Host tests** passed, as did type checking. The repair candidate passed plugin installation, a cold start, the Fusion settings page and both settings/cache APIs. The v0.2.1 server and client bundles are byte-for-byte identical to that candidate.
+
+The real PowerShell ACL test denied the Lead's `Set-Content probe.txt test` command and left no file; the Sidekick could write the same file within its granted workspace. This is partial ACL enforcement, with the limits above. These checks used no model credentials or real model requests. macOS regression: 253 unit tests and 235 Host tests passed; the Windows-only ACL test was skipped.
 
 ## Data
 
@@ -91,16 +97,18 @@ While the Lead waits for the Sidekick, often for several minutes, the model's pr
 - **Slower than the frontier model alone:** GPT-6 + Flash took about 5× the time of GPT-6 alone, mostly spent in the Sidekick. A faster Sidekick helps.
 - **Lead takeover:** never triggered in 72 measured runs; only automated tests cover it.
 - **PATH in the macOS desktop app:** DSH Studio opened from the Dock gets only the system PATH, so `node`, `npm`, `cargo` and other tools installed by Homebrew (`/opt/homebrew/bin`), nvm and similar are not found by the shell. This is DSH's environment and affects every model. Before handing off work, Fusion checks the programs the acceptance commands use; when one is missing it tells the Lead where it is installed (for example `/opt/homebrew/bin/node`), and the Lead retries with the full path.
-- **Windows not supported, Linux not verified:** see Operating systems above.
+- **Windows 10/11 and Linux not verified:** see Operating systems above.
 
 ## Development
 
 ```sh
-pnpm install
+corepack pnpm@9.15.9 install --frozen-lockfile
 node scripts/link-host.mjs /path/to/deepseek-harness-0.1.7-rc.2   # link DSH sources for development
 DSHX_HARNESS=/path/to/deepseek-harness-0.1.7-rc.2 pnpm build
 pnpm test && DSHX_HARNESS=/path/to/deepseek-harness-0.1.7-rc.2 pnpm test:host
 ```
+
+For Windows development, put PowerShell 7 (`pwsh`), Node and Python on the test process PATH. Native tests use `DSHX_HARNESS` to read the built, pinned Host checkout; no Host source changes are required.
 
 The plugin uses only DSH's public plugin APIs and never modifies DSH itself. How to adapt it to a new DSH release: [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 

@@ -17,8 +17,10 @@ import * as Spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import { MockAdapter, textResponse, toolCallResponse } from '@fusion-host-test/mock-adapter'
 import { TestSessionQuery } from '@fusion-host-test/session-query'
 import { LocalBashExecutor } from '@deepseek-ai/dsh-bash-local'
+import { PwshLocalExecutor } from '@deepseek-ai/dsh-pwsh-local'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import * as ToolBash from '@deepseek-ai/dsh-tool-bash'
+import * as ToolPwsh from '@deepseek-ai/dsh-tool-pwsh'
 import * as ShellEnv from '@deepseek-ai/dsh-shell-env'
 import { FusionCoordinator } from '../../src/host/coordinator.js'
 import { SqliteFusionStore } from '../../src/task/sqlite-store.js'
@@ -26,14 +28,21 @@ import { completeProfile } from '../../src/profile/resolve.js'
 import { loadPromptBundle } from '../../src/prompts.js'
 
 const root = process.env.FUSION_CRASH_ROOT!, phase = process.env.FUSION_CRASH_PHASE!, kind = process.env.FUSION_CRASH_KIND!
+const windows = process.platform === 'win32'
+const shellTool = windows ? 'pwsh' : 'bash'
+const python = windows ? 'python' : 'python3'
 const constraint = 'Keep the public test unchanged. Preserve DO_NOT_DROP_CRASH_CONSTRAINT in the task facts.'
 const takeover = () => toolCallResponse('takeover', 'fusion_takeover', { reason: 'Apply the small inspected correction directly' })
-const edit = () => toolCallResponse('edit', 'bash', { command: "printf 'def add(a, b):\\n    return a + b\\n' > calc.py; printf '# effect\\n' >> effects.txt", description: 'Apply one correction and count the effect' })
-const running = () => toolCallResponse('running-command', 'bash', { command: 'python3 -B run_until_stopped.py', description: 'Wait in the owned process fixture before applying an effect', timeoutMs: 60_000 })
+const edit = () => toolCallResponse('edit', shellTool, { command: windows
+  ? '[IO.File]::WriteAllText((Join-Path $PWD \'calc.py\'), "def add(a, b):`n    return a + b`n"); [IO.File]::AppendAllText((Join-Path $PWD \'effects.txt\'), "# effect`n")'
+  : "printf 'def add(a, b):\\n    return a + b\\n' > calc.py; printf '# effect\\n' >> effects.txt", description: 'Apply one correction and count the effect' })
+const running = () => toolCallResponse('running-command', shellTool, { command: `${python} -B run_until_stopped.py`, description: 'Wait in the owned process fixture before applying an effect', timeoutMs: 60_000 })
 const delegate = () => toolCallResponse('delegate', 'fusion_delegate', {
   goal: 'Fix addition', brief: 'Correct calc.py and report the candidate. Keep the public test unchanged.',
   constraints: [constraint], allowedPaths: ['calc.py', 'effects.txt', 'running-command.json', 'heartbeat.txt'],
-  checks: [{ id: 'addition', description: 'Original public test passes', command: 'python3 -B -m unittest -v test_calc',
+  checks: [{ id: 'addition', description: 'Original public test passes', command: windows
+    ? `${python} -B -c "import sys; sys.path.insert(0, '.'); import runpy; runpy.run_module('unittest', run_name='__main__')" -v test_calc`
+    : `${python} -B -m unittest -v test_calc`,
     kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }],
 })
 const report = () => toolCallResponse('report', 'fusion_submit_result', { summary: 'The inspected addition fix is present.', status: 'completed', unresolved: [] })
@@ -62,7 +71,7 @@ it('runs only inside its owned crash harness', async () => {
     writeFileSync(join(workspace, 'effects.txt'), '')
     if (kind === 'live-command') writeFileSync(join(workspace, 'run_until_stopped.py'), [
       'import json, os, time', 'from pathlib import Path',
-      "Path('running-command.json').write_text(json.dumps({'pid': os.getpid(), 'pgid': os.getpgid(0)}))",
+      "Path('running-command.json').write_text(json.dumps({'pid': os.getpid(), 'pgid': os.getpgid(0) if hasattr(os, 'getpgid') else None}))",
       'deadline = time.monotonic() + 45', 'count = 0',
       'while time.monotonic() < deadline:',
       "    Path('heartbeat.txt').write_text(str(count))", '    count += 1', '    time.sleep(0.05)',
@@ -79,8 +88,14 @@ it('runs only inside its owned crash harness', async () => {
   await ctx.plugin(Spawn, { providerName: 'spawn' })
   await ctx.plugin(LocalSubprocessRuntime)
   await ctx.plugin(ShellEnv, { dshHome: join(root, 'home') })
-  await ctx.plugin(LocalBashExecutor, { timeoutMs: 5000 })
-  await ctx.plugin(ToolBash, { enableRunInBackground: false })
+  if (windows) {
+    // pwsh cold start exceeds the 5s POSIX-comfortable bound under parallel load.
+    await ctx.plugin(PwshLocalExecutor, { timeoutMs: 15_000 })
+    await ctx.plugin(ToolPwsh, { enableRunInBackground: false })
+  } else {
+    await ctx.plugin(LocalBashExecutor, { timeoutMs: 5000 })
+    await ctx.plugin(ToolBash, { enableRunInBackground: false })
+  }
   await ctx.plugin(ApprovalService, { policy: 'ask' })
   if (kind === 'compaction') await ctx.plugin(BasicCompaction, { auto: false, maxTokens: 512 })
   const script: ConstructorParameters<typeof MockAdapter>[0] = ['inspect', 'observe'].includes(phase) ? [] : phase === 'crash'
@@ -110,7 +125,7 @@ it('runs only inside its owned crash harness', async () => {
     ...(kind === 'compaction' ? { context: { lead: { targetInputTokens: 32_000 } } } : {}),
   }, prompts)
   const coordinator = new FusionCoordinator(ctx, store, { profile: { profile, prompts }, leaseRoot: join(root, 'leases'),
-    workerTools: ['bash'], authorizeRequest: () => { /* Only the local scripted adapter exists. */ } })
+    workerTools: [shellTool], authorizeRequest: () => { /* Only the local scripted adapter exists. */ } })
   try {
     if (phase === 'crash' && kind === 'compaction') {
       send(parent, 'Explore this project before the task.')
@@ -121,7 +136,7 @@ it('runs only inside its owned crash harness', async () => {
     let answer!: (outcome: ApprovalOutcome) => void
     let asked = false
     if (kind === 'approval') {
-      ctx.on('tools/pre-execute', async (exec, next) => exec.name === 'bash' ? { kind: 'ask', reason: 'Fixture approval' } : next())
+      ctx.on('tools/pre-execute', async (exec, next) => exec.name === shellTool ? { kind: 'ask', reason: 'Fixture approval' } : next())
       ctx.on('approval/request', async () => { asked = true; return new Promise<ApprovalOutcome>(resolve => { answer = resolve }) })
     }
     if (phase === 'crash') {
@@ -150,6 +165,14 @@ it('runs only inside its owned crash harness', async () => {
       await expect(coordinator.reconcile(parent, { commandId: 'insufficient-inspection', note: 'The old Host process is dead and the workspace was inspected.' })).rejects.toThrow('--effects-stopped')
       expect(adapter.requests).toHaveLength(0)
       if (phase === 'observe') {
+        if (windows) {
+          // Host termination already stopped the command through its Job;
+          // the same "no live command" evidence is the absent PID.
+          expect(() => process.kill(stopped.command.pid, 0)).toThrow()
+          receipt({ point: kind, taskId, childId: coordinator.state(taskId).acceptedChild,
+            state: coordinator.state(taskId), requestCount: 0, hostDeathStoppedCommand: true, genericRecoveryRejected: true })
+          return
+        }
         process.kill(stopped.command.pid, 0)
         receipt({ point: kind, taskId, childId: coordinator.state(taskId).acceptedChild,
           state: coordinator.state(taskId), requestCount: 0, liveCommandVerified: true, genericRecoveryRejected: true })
@@ -185,6 +208,12 @@ it('runs only inside its owned crash harness', async () => {
       answer('allowed-once')
     }
     await parent.whenIdle()
+    // Post-mortem evidence — only written when a run opts in via env, so normal
+    // runs leave no stray files outside the fixture root.
+    if (process.env.FUSION_CRASH_EVIDENCE_DIR)
+      writeFileSync(join(process.env.FUSION_CRASH_EVIDENCE_DIR, `debug-tools-${phase}-${kind}.json`),
+        JSON.stringify(parent.session.snapshotEvents()
+          .filter(event => event.type === 'tool/call' || event.type === 'tool/result'), null, 2))
     expect(coordinator.state(taskId), JSON.stringify(parent.session.snapshotEvents().slice(-10))).toMatchObject({ phase: 'COMPLETED', control: { recovering: false } })
     if (kind === 'worker-effect' || kind === 'live-command') {
       expect(coordinator.state(taskId)).toMatchObject({ acceptedChild: stopped.childId, verification: 'verified' })

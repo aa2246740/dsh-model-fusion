@@ -17,7 +17,7 @@ interface ActivityLink {
   done?: boolean
 }
 const prefix = 'activity-link:'
-const visibleTools = new Set(['bash', 'read', 'write', 'edit', 'glob', 'grep', 'job_output', 'job_kill', 'str_replace_editor'])
+const visibleTools = new Set(['bash', 'pwsh', 'read', 'write', 'edit', 'glob', 'grep', 'job_output', 'job_kill', 'str_replace_editor'])
 const parentPrefix = (parentId: string) => `activity:${encodeURIComponent(parentId)}:`
 const callPrefix = (parentId: string, callId: string) => `${parentPrefix(parentId)}${encodeURIComponent(callId)}:`
 
@@ -101,6 +101,7 @@ export class NativeFusionActivity {
     this.#dispose.push(ctx.on('agent/created', ({ agent }) => {
       this.#replay(agent.session)
       for (const child of ctx.sessions.list()) if (child.header.parentSession === agent.id) this.#replay(child)
+      return undefined
     }))
     for (const session of ctx.sessions.list()) this.#replay(session)
   }

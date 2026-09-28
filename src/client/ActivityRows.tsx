@@ -9,7 +9,7 @@ const labelsFor = (lang: Lang) => ({ codeLabel: tr(lang, '代码', 'Code'), wrap
   expandAria: (n: number) => tr(lang, `展开其余 ${n} 行`, `Show ${n} more lines`), expand: (n: number) => tr(lang, `展开其余 ${n} 行`, `Show ${n} more lines`) })
 const terminalLabelsFor = (lang: Lang) => ({ ...labelsFor(lang), signal: (s: string) => tr(lang, `信号 ${s}`, `signal ${s}`), exitCode: (n: number) => tr(lang, `退出码 ${n}`, `exit code ${n}`),
   running: tr(lang, '执行中', 'Running'), failed: tr(lang, '执行失败', 'Failed'), done: tr(lang, '已返回', 'Done'), noOutput: tr(lang, '无输出', 'No output'), noExitCode: tr(lang, '未记录退出码', 'No exit code') })
-const titleFor = (lang: Lang): Record<string, string> => ({ bash: tr(lang, '终端', 'Terminal'), read: tr(lang, '读取', 'Read'), write: tr(lang, '写入', 'Write'), edit: tr(lang, '编辑', 'Edit'),
+const titleFor = (lang: Lang): Record<string, string> => ({ bash: tr(lang, '终端', 'Terminal'), pwsh: tr(lang, '终端', 'Terminal'), read: tr(lang, '读取', 'Read'), write: tr(lang, '写入', 'Write'), edit: tr(lang, '编辑', 'Edit'),
   glob: tr(lang, '查找文件', 'Find files'), grep: tr(lang, '搜索', 'Search'), job_output: tr(lang, '命令输出', 'Command output'), job_kill: tr(lang, '停止命令', 'Stop command'), str_replace_editor: tr(lang, '编辑', 'Edit') })
 
 export function ActivityCard({ row, done, cwd, openFile }: {
@@ -39,7 +39,7 @@ export function ActivityCard({ row, done, cwd, openFile }: {
     {open && <div className="fusion-activity-body">
       {path && <button type="button" className="fusion-activity-file" onClick={() => openFile(path)}>{tr(lang, '打开', 'Open')} {path}</button>}
       {diffs.length ? <DiffBlock diffs={diffs} labels={labelsFor(lang)} maxLines={16} />
-        : row.call.data.name === 'bash' && command ? <TerminalBlock command={command} cwd={cwd} output={output}
+        : (row.call.data.name === 'bash' || row.call.data.name === 'pwsh') && command ? <TerminalBlock command={command} cwd={cwd} output={output}
           running={!row.result && !done} exitCode={exit ? Number(exit[1]) : undefined} labels={terminalLabelsFor(lang)} />
           : <pre>{output || (row.result ? tr(lang, '已返回，无文本输出。', 'Returned without text output.') : row.call.data.arguments)}</pre>}
     </div>}

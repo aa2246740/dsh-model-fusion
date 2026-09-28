@@ -6,6 +6,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { PairProfile } from '../contracts.js'
 import { digestOf } from '../digest.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
+import { isShellTool, nativeShellTool } from '../host/shell.js'
 
 /** A declared benchmark treatment, never installed in product sessions. */
 export const naivePrompts = {
@@ -39,7 +40,7 @@ export class NaiveCoordinator {
   #cleanupFailure: unknown
 
   constructor(readonly ctx: Context, readonly parent: Agent, readonly store: SqliteFusionStore,
-    readonly profile: PairProfile, readonly workerMaxTokens: number, readonly tools: readonly string[] = ['bash']) {
+    readonly profile: PairProfile, readonly workerMaxTokens: number, readonly tools: readonly string[] = [nativeShellTool]) {
     const provider = ctx.subagents.getProvider('spawn')
     if (!provider || provider.inheritsParentContext !== false) throw new Error('Naive requires a fresh-context native spawn provider')
     this.#dispose.push(parent.ctx.systemPrompt.section({ name: 'naive-benchmark', order: 90, text: naivePrompts.lead }))
@@ -48,7 +49,7 @@ export class NaiveCoordinator {
     this.#dispose.push(ctx.on('tools/execute', async (exec, next) => {
       if (!exec.agent || !this.owns(exec.agent)) return next()
       this.assertReady()
-      if (exec.name !== 'bash') return next()
+      if (!isShellTool(exec.name)) return next()
       if (this.#writer || this.#delegating && exec.agent === parent) throw new Error('Naive requires one native writer at a time')
       this.#writer = exec.token
       try { return await next() }

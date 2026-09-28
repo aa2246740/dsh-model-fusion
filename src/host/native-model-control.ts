@@ -9,6 +9,7 @@ import type { PhysicalRoute, Role } from '../contracts.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import { BindingRepository, type SessionBinding } from './bindings.js'
 import { adaptiveWorkflow, enforcedWorkflow } from './native-workflow.js'
+import { isShellTool } from './shell.js'
 
 const LEAD_RECOVERABLE = ['WORKFLOW_INCOMPLETE', 'NO_PROGRESS', 'UNKNOWN']
 const LEAD_RECOVERIES = 2
@@ -94,7 +95,7 @@ export class NativeModelControl {
       if (enforcedWorkflow(owner.binding)) return undefined
       const id = `progress:${owner.binding.taskId}:${exec.agent!.id}`, row = store.readDocument(id)
       const prior = row?.value as { fingerprint?: string; count?: number } | undefined
-      const shell = exec.name === 'bash' && !result.isError ? result.value as { exitCode?: unknown; stdout?: unknown; stderr?: unknown } : undefined
+      const shell = isShellTool(exec.name) && !result.isError ? result.value as { exitCode?: unknown; stdout?: unknown; stderr?: unknown } : undefined
       const failedShell = typeof shell?.exitCode === 'number' && shell.exitCode !== 0
       const fingerprint = result.isError || failedShell ? digestOf({ name: exec.name, args: exec.arguments,
         outcome: failedShell ? { exitCode: shell!.exitCode, stdout: shell!.stdout, stderr: shell!.stderr } : result.content }) : undefined

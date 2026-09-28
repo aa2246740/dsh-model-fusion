@@ -99,9 +99,34 @@ export function changedPaths(before: WorkspaceSnapshot, after: WorkspaceSnapshot
   return [...new Set([...old.keys(), ...now.keys()])].filter(path => old.get(path) !== now.get(path)).sort()
 }
 
+/**
+ * Workspace-relative allowlist check. `/` always separates segments; `\` is a
+ * separator only on Windows — on POSIX it is a legal filename character, so
+ * `src\file.ts` must not match a `src` grant there. `.`/`..` segments then
+ * resolve lexically, so `src/../outside` (and its backslash form on Windows)
+ * never matches a `src` grant. workspacePath only bounds a path to the
+ * workspace root; membership in allowedPaths is decided here. Absolute paths
+ * (`/x`, `C:\x`, drive-relative `C:x`, UNC), empty paths and NUL are not
+ * workspace-relative and never normalize.
+ */
+export function normalizeRelativePath(path: string): string | undefined {
+  if (!path || path.includes('\0') || isAbsolute(path) || (process.platform === 'win32' && /^[a-z]:/i.test(path))) return undefined
+  const segments: string[] = []
+  for (const segment of path.split(process.platform === 'win32' ? /[\\/]+/ : /\//)) {
+    if (!segment || segment === '.') continue
+    if (segment === '..') { if (!segments.pop()) return undefined }
+    else segments.push(segment)
+  }
+  return segments.join('/')
+}
+
 export function pathAllowed(path: string, allowed: readonly string[]): boolean {
+  const normalized = normalizeRelativePath(path)
+  if (normalized === undefined) return false
+  // `'.'` normalizes to the root: it is the legitimate whole-workspace grant. An empty
+  // or absolute allowed entry instead fails normalization above and never authorizes.
   return allowed.some(raw => {
-    const prefix = raw.replace(/^\.\//, '').replace(/\/$/, '')
-    return prefix === '.' || path === prefix || path.startsWith(`${prefix}/`)
+    const prefix = normalizeRelativePath(raw)
+    return prefix !== undefined && (prefix === '' || normalized === prefix || normalized.startsWith(`${prefix}/`))
   })
 }

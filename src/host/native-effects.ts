@@ -7,6 +7,7 @@ import type { JobView } from '@deepseek-ai/dsh-jobs'
 import type { ArtifactRef, Role, TaskId } from '../contracts.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import type { SessionBinding } from './bindings.js'
+import { isShellTool } from './shell.js'
 
 interface EffectRecord {
   schemaVersion: 1
@@ -67,13 +68,22 @@ export class NativeEffects {
       try {
         const result = await next()
         const value = !result.isError && result.value
-        if (exec.name === 'bash' && (exec.arguments as { run_in_background?: unknown }).run_in_background === true && !result.isError) {
-          const background = value as { kind?: unknown; jobId?: unknown } | null
-          if (!background || background.kind !== 'background' || typeof background.jobId !== 'string') {
-            throw new Error('Native background bash returned no authoritative job identity')
+        // A shell call keeps a live native job when it asked for background OR its foreground run was
+        // promoted (rc.2 returns kind:'promoted' + jobId on a foreground timeout, even with
+        // run_in_background=false). Either way the job must own the write lease until it settles.
+        const resultJob = (!result.isError ? value : null) as { kind?: unknown; jobId?: unknown } | null
+        const jobKind = resultJob?.kind
+        const keepsLiveJob = isShellTool(exec.name) && !result.isError
+          && ((exec.arguments as { run_in_background?: unknown }).run_in_background === true
+            || jobKind === 'background' || jobKind === 'promoted')
+        if (keepsLiveJob) {
+          // kind=promoted/background is a live job claim: verify the identity, never record it as
+          // returned — a missing jobId would release the write lease while the command still runs.
+          if ((jobKind !== 'background' && jobKind !== 'promoted') || typeof resultJob?.jobId !== 'string') {
+            throw new Error(`Native ${exec.name} returned a live job without an authoritative jobId`)
           }
-          const snapshot = this.#registry!.get(JobId(background.jobId), exec.agent?.id)
-          if (snapshot.kind !== 'bash' || snapshot.owner !== exec.agent!.id) throw new Error('Native job ownership mismatch')
+          const snapshot = this.#registry!.get(JobId(resultJob.jobId), exec.agent?.id)
+          if (snapshot.kind !== exec.name || snapshot.owner !== exec.agent!.id) throw new Error('Native job ownership mismatch')
           const maximum = this.callbacks.backgroundMaxMs ? this.callbacks.backgroundMaxMs(exec, owner.binding) : 60_000
           const requested = (exec.arguments as { timeoutMs?: unknown }).timeoutMs
           const timeout = typeof requested === 'number' && Number.isFinite(requested) && requested > 0
@@ -140,7 +150,7 @@ export class NativeEffects {
 
   #assertJob(row: EffectRecord, snapshot: JobView): void {
     if (!row.nativeJob || row.processId !== process.pid || snapshot.id !== row.nativeJob.id
-      || snapshot.kind !== 'bash' || snapshot.owner !== row.agentId || snapshot.startedAt !== row.nativeJob.startedAt) {
+      || snapshot.kind !== row.toolName || snapshot.owner !== row.agentId || snapshot.startedAt !== row.nativeJob.startedAt) {
       throw new Error('Native job identity changed; inspect rather than adopting or replaying it')
     }
   }

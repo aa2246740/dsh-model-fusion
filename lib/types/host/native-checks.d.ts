@@ -30,6 +30,8 @@ export interface FrozenCheck {
     definition: CheckDefinition;
     plan: CheckPlan;
 }
+/** Shell setup failures need a corrected check, rather than an implementation repair. */
+export declare function checkCommandUnavailable(exitCode: number | null, stderr: string, platform?: NodeJS.Platform): boolean;
 export declare function freezeChecks(order: WorkOrder, root: string, definitions: readonly CheckDefinition[]): FrozenCheck[];
 /**
  * Counts passed tests from a runner's summary. A suite passes when nothing failed or errored and at
@@ -51,7 +53,7 @@ export declare function parseTestFailures(parser: CheckDefinition['parser'], tex
  * out because an earlier `cd` in the same command changes where they resolve;
  * anything this cannot parse is simply not probed.
  */
-export declare function checkPrograms(command: string): string[];
+export declare function checkPrograms(command: string, platform?: NodeJS.Platform): string[];
 /**
  * Resolves program names the way the native bash tool will: `bash -c` with the
  * Host's own PATH (its subprocess scrub removes only credential-shaped and

@@ -16,6 +16,7 @@ import { MockAdapter, textResponse } from '@fusion-host-test/mock-adapter'
 import { toolCallResponse } from '@fusion-host-test/mock-adapter'
 import { TestSessionQuery } from '@fusion-host-test/session-query'
 import { NativeWorkerTransport } from '../src/host/native-worker.js'
+import { mountNativeShell, shellTool, shellCommand } from './shell-fixture.js'
 import { observeNativeUsage } from '../src/host/native-usage.js'
 import { SqliteFusionStore } from '../src/task/sqlite-store.js'
 import { TaskId, SnapshotId, WorkOrderId } from '../src/contracts.js'
@@ -26,10 +27,6 @@ import { created } from '../tests/helpers.js'
 import { NativeFusionScopes } from '../src/host/native-scopes.js'
 import { completeProfile } from '../src/profile/resolve.js'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { LocalBashExecutor } from '@deepseek-ai/dsh-bash-local'
-import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
-import * as ToolBash from '@deepseek-ai/dsh-tool-bash'
-import * as ShellEnv from '@deepseek-ai/dsh-shell-env'
 
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
@@ -48,6 +45,15 @@ async function setup(script: ConstructorParameters<typeof MockAdapter>[0]) {
   const adapter = new MockAdapter(script)
   ctx.llm.registerAdapter(['test-native'], adapter)
   const handle = await ctx.agents.create({ sessionId: SessionId('lead'), meta: { cwd: root }, agentOptions: { provider: 'test-native', model: 'lead' } })
+  // Native lifecycle order before the root fiber dispose: drain the durable
+  // continuable children this Lead still owns, then dispose the Lead handle.
+  cleanups.push(async () => {
+    if (ctx.subagents) {
+      await ctx.subagents.drainContinuableChildren(handle.agent,
+        ctx.agents.list().filter(agent => agent.session.header.parentSession === handle.agent.id).map(agent => agent.id))
+      await handle.dispose()
+    }
+  })
   const parent = handle.agent
   const transport = new NativeWorkerTransport(ctx)
   return { ctx, parent, adapter, transport, root }
@@ -60,10 +66,8 @@ const request = {
 const freshSignal = () => new AbortController().signal
 
 async function mountShell(ctx: Context, root: string) {
-  await ctx.plugin(LocalSubprocessRuntime)
-  await ctx.plugin(ShellEnv, { dshHome: join(root, 'dsh-home') })
-  await ctx.plugin(LocalBashExecutor, { timeoutMs: 5_000 })
-  await ctx.plugin(ToolBash, { enableRunInBackground: false })
+  // pwsh cold start exceeds the 5s POSIX-comfortable bound under parallel load.
+  await mountNativeShell(ctx, { dshHome: join(root, 'dsh-home'), timeoutMs: process.platform === 'win32' ? 15_000 : 5_000 })
 }
 
 describe('native persistent Worker transport', () => {
@@ -163,7 +167,15 @@ describe('native persistent Worker transport', () => {
     await ctx.sessions.flush(parent.session)
     await ctx.fiber.dispose()
     const fresh = new Context()
-    cleanups.push(async () => { await fresh.fiber.dispose() })
+    cleanups.push(async () => {
+      if (fresh.subagents && freshHandle) {
+        await fresh.subagents.drainContinuableChildren(freshHandle.agent,
+          fresh.agents.list().filter(agent => agent.session.header.parentSession === freshHandle.agent.id).map(agent => agent.id))
+        await freshHandle.dispose()
+      }
+      await fresh.fiber.dispose()
+    })
+    let freshHandle: Awaited<ReturnType<typeof fresh.agents.resume>> | undefined
     await mountAgentLoopTestDependencies(fresh)
     await fresh.plugin(JsonlSessionPersistence, { root })
     await fresh.plugin(AgentLoop, { agents: [] })
@@ -173,6 +185,7 @@ describe('native persistent Worker transport', () => {
     const adapter = new MockAdapter([textResponse('persistent second answer')])
     fresh.llm.registerAdapter(['test-native'], adapter)
     const handle = await fresh.agents.resume({ resumeSessionId: parent.id, agentOptions: { provider: 'test-native', model: 'lead' } })
+    freshHandle = handle
     const recovered = new NativeWorkerTransport(fresh)
     expect(fresh.agents.get(SessionId(request.childId))).toBeUndefined()
     const accepted = await recovered.continue(handle.agent, request.childId, 'Continue after restart', freshSignal())
@@ -184,17 +197,17 @@ describe('native persistent Worker transport', () => {
 
   it('runs and reworks a real native shell tool, including native permission denial', async () => {
     const { ctx, parent, transport, root, adapter } = await setup([
-      toolCallResponse('write-first', 'bash', { command: 'printf first > result.txt', description: 'Write the test-owned result file' }),
+      toolCallResponse('write-first', shellTool, { command: shellCommand('printf first > result.txt', "[IO.File]::WriteAllText((Join-Path $PWD 'result.txt'),'first')"), description: 'Write the test-owned result file' }),
       textResponse('first done'),
-      toolCallResponse('write-rework', 'bash', { command: 'printf revised > result.txt', description: 'Revise the test-owned result file' }),
+      toolCallResponse('write-rework', shellTool, { command: shellCommand('printf revised > result.txt', "[IO.File]::WriteAllText((Join-Path $PWD 'result.txt'),'revised')"), description: 'Revise the test-owned result file' }),
       textResponse('revised done'),
-      toolCallResponse('denied-call', 'bash', { command: 'printf forbidden > blocked-file.txt', description: 'Exercise the test denial policy' }),
+      toolCallResponse('denied-call', shellTool, { command: shellCommand('printf forbidden > blocked-file.txt', "[IO.File]::WriteAllText((Join-Path $PWD 'blocked-file.txt'),'forbidden')"), description: 'Exercise the test denial policy' }),
       textResponse('policy denied'),
     ])
     await mountShell(ctx, root)
     ctx.on('tools/pre-execute', (exec, next) => JSON.stringify(exec.arguments).includes('blocked-file.txt')
       ? Promise.resolve({ kind: 'deny', reason: 'test policy denies this file' }) : next())
-    await transport.start(parent, { ...request, allowedTools: ['bash'] }, freshSignal())
+    await transport.start(parent, { ...request, allowedTools: [shellTool] }, freshSignal())
     const child = await transport.settle(parent, request.childId, freshSignal())
     expect(readFileSync(join(root, 'result.txt'), 'utf8')).toBe('first')
     await transport.continue(parent, child.id, 'Revise the result', freshSignal())

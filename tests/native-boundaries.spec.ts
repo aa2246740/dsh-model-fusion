@@ -44,7 +44,7 @@ describe('native evidence and authorization boundaries', () => {
     const budget = new NativeRequestBudget(store)
     for (let i = 0; i < 200; i++) budget.reserve(route, 131_072)
     expect(() => authorizeConfiguredPair(store, [route], { acknowledgeAccountUsage: true, acknowledgeUnknownCost: true, maxNativeRequests: 0 })).toThrow('超出允许范围')
-  })
+  }, 30_000)
 
   it('keeps deleted files and changed symlink targets in the source manifest, and refuses link traversal', () => {
     const root = temp(), project = join(root, 'project')

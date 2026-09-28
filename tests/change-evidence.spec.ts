@@ -25,8 +25,10 @@ function fixture() {
 describe('durable complete change evidence', () => {
   it('replays stored patches into the exact candidate, including empty files, modes, CRLF, links and unusual names', () => {
     const { root, project, store, read, manifest } = fixture()
+    // `"` is an illegal Windows filename character; the unusual-name coverage uses a legal variant there.
+    const oddName = process.platform === 'win32' ? '文件 [odd] a.txt' : '文件 " a.txt'
     const originals: Record<string, string> = { 'calc.py': 'def add(a, b):\n    return a - b\n', 'crlf.txt': 'first\r\nold\r\nlast\r\n',
-      'no-eol.txt': 'one\ntwo', 'remove.txt': 'gone\n', 'empty-remove': '', 'exec.sh': '#!/bin/sh\necho ok\n', '文件 " a.txt': 'before\n' }
+      'no-eol.txt': 'one\ntwo', 'remove.txt': 'gone\n', 'empty-remove': '', 'exec.sh': '#!/bin/sh\necho ok\n', [oddName]: 'before\n' }
     for (const [name, text] of Object.entries(originals)) writeFileSync(join(project, name), text)
     symlinkSync('old-target', join(project, 'link'))
     const replay = join(root, 'replay'); cpSync(project, replay, { recursive: true, verbatimSymlinks: true })
@@ -34,7 +36,7 @@ describe('durable complete change evidence', () => {
     writeFileSync(join(project, 'calc.py'), 'def add(a, b):\n    return a + b\n')
     writeFileSync(join(project, 'crlf.txt'), 'first\r\nnew\r\nlast\r\n')
     writeFileSync(join(project, 'no-eol.txt'), 'one\ntwo\n')
-    writeFileSync(join(project, '文件 " a.txt'), 'after\n')
+    writeFileSync(join(project, oddName), 'after\n')
     writeFileSync(join(project, 'new.txt'), 'created without final newline')
     writeFileSync(join(project, 'empty-new'), '')
     chmodSync(join(project, 'exec.sh'), 0o755)
@@ -42,13 +44,17 @@ describe('durable complete change evidence', () => {
     symlinkSync('new-target', join(project, 'link'))
     const candidate = snapshotWorkspace(project)
     const result = manifest(saveChangeManifest(store, TASK, base, candidate, captured).id)
-    expect(result.diffs).toHaveLength(10)
+    // The exec-bit change produces no diff on Windows, which has no mode semantics.
+    expect(result.diffs).toHaveLength(process.platform === 'win32' ? 9 : 10)
     const diff = result.diffs.map(item => { expect(item.status).toBe('text'); return read(item.patch!.id).toString() }).join('')
-    execFileSync('git', ['apply', '--check', '-'], { cwd: replay, input: diff, stdio: ['pipe', 'pipe', 'pipe'] })
-    execFileSync('git', ['apply', '-'], { cwd: replay, input: diff, stdio: ['pipe', 'pipe', 'pipe'] })
+    // Windows git defaults to autocrlf and symlink-as-text; the replay must reproduce bytes and links.
+    const gitFlags = ['-c', 'core.autocrlf=false', '-c', 'core.symlinks=true']
+    execFileSync('git', [...gitFlags, 'apply', '--check', '-'], { cwd: replay, input: diff, stdio: ['pipe', 'pipe', 'pipe'] })
+    execFileSync('git', [...gitFlags, 'apply', '-'], { cwd: replay, input: diff, stdio: ['pipe', 'pipe', 'pipe'] })
     expect(snapshotWorkspace(replay).entries).toEqual(candidate.entries)
     expect(readlinkSync(join(replay, 'link'))).toBe('new-target')
-    expect(lstatSync(join(replay, 'exec.sh')).mode & 0o111).not.toBe(0)
+    // Windows has no exec bit; mode assertions only carry meaning on POSIX.
+    if (process.platform !== 'win32') expect(lstatSync(join(replay, 'exec.sh')).mode & 0o111).not.toBe(0)
     const calc = result.diffs.find(item => item.path === 'calc.py')!
     expect(read(calc.before!.content!.id).toString()).toBe(originals['calc.py'])
     expect(read(calc.after!.content.id)).toEqual(readFileSync(join(project, 'calc.py')))
@@ -76,13 +82,15 @@ describe('durable complete change evidence', () => {
     writeFileSync(join(project, 'kind'), 'original\n')
     const base = snapshotWorkspace(project), captured = captureChangeBase(store, TASK, base, ['.'])
     writeFileSync(join(project, 'binary'), Buffer.from([0, 254, 3]))
-    rmSync(join(project, 'kind')); symlinkSync('/outside/not-read', join(project, 'kind'))
+    // Node resolves a forward-slash absolute target to a drive-rooted path when creating the link on Windows.
+    const outsideTarget = process.platform === 'win32' ? 'C:\\outside\\not-read' : '/outside/not-read'
+    rmSync(join(project, 'kind')); symlinkSync(outsideTarget, join(project, 'kind'))
     const diffs = manifest(saveChangeManifest(store, TASK, base, snapshotWorkspace(project), captured).id).diffs
     expect(diffs.map(item => item.status)).toEqual(['binary', 'type-change'])
     expect(diffs.every(item => !item.patch)).toBe(true)
     expect(read(diffs[0].before!.content!.id)).toEqual(Buffer.from([0, 255, 2]))
     expect(read(diffs[0].after!.content.id)).toEqual(Buffer.from([0, 254, 3]))
-    expect(read(diffs[1].after!.content.id).toString()).toBe('/outside/not-read')
+    expect(read(diffs[1].after!.content.id).toString()).toBe(outsideTarget)
   })
 
   it('captures only allowed files and rejects stale, missing or foreign base evidence', () => {

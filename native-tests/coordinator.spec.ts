@@ -28,16 +28,11 @@ import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as Spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import { MockAdapter, textResponse, toolCallResponse, maxTokensResponse } from '@fusion-host-test/mock-adapter'
 import { TestSessionQuery } from '@fusion-host-test/session-query'
-import { LocalBashExecutor } from '@deepseek-ai/dsh-bash-local'
-import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
-import * as ToolBash from '@deepseek-ai/dsh-tool-bash'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import * as ToolFs from '@deepseek-ai/dsh-tool-fs'
+import { mountNativeShell, shellTool, shellCommand, py } from './shell-fixture.js'
 import CodeRuntime from '@deepseek-ai/dsh-ptc-runtime-node'
-import LocalJobs from '@deepseek-ai/dsh-jobs-local'
 import { JobId } from '@deepseek-ai/dsh-jobs'
-import * as ToolJobs from '@deepseek-ai/dsh-tool-jobs'
-import * as ShellEnv from '@deepseek-ai/dsh-shell-env'
 import { FusionCoordinator } from '../src/host/coordinator.js'
 import { SqliteFusionStore } from '../src/task/sqlite-store.js'
 import { completeProfile } from '../src/profile/resolve.js'
@@ -57,6 +52,27 @@ import { activityRows } from '../src/client/activity-model.js'
 
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
+
+/** Windows process startup can exceed Vitest's one-second polling default. */
+function waitForNative<T>(callback: () => T, options?: Parameters<typeof vi.waitFor>[1]) {
+  return vi.waitFor(callback, options ?? { timeout: process.platform === 'win32' ? 10_000 : 1000 })
+}
+
+/** Keep native settlement notices from consuming the next user turn's script. */
+function holdLeadForFollowup(adapter: MockAdapter, initialLeadResponses = 2) {
+  let released = false
+  const stream = adapter.stream.bind(adapter)
+  vi.spyOn(adapter, 'stream').mockImplementation(async function* (request) {
+    if (!released && request.model === 'lead'
+      && adapter.requests.filter(item => item.model === 'lead').length >= initialLeadResponses) {
+      adapter.requests.push(request)
+      yield* textResponse('Awaiting the user continuation decision.')
+      return
+    }
+    yield* stream(request)
+  })
+  return () => { released = true }
+}
 
 type Script = ConstructorParameters<typeof MockAdapter>[0]
 async function setup(script: Script, workerScript?: Script, options: {
@@ -96,17 +112,13 @@ async function setup(script: Script, workerScript?: Script, options: {
   await ctx.plugin(TestSessionQuery)
   await ctx.plugin(SubagentRuntime)
   await ctx.plugin(Spawn, { providerName: 'spawn' })
-  await ctx.plugin(LocalSubprocessRuntime)
-  await ctx.plugin(ShellEnv, { dshHome: join(root, 'home') })
   if (options.sandbox) {
     const modeOf = (session: { snapshotEvents(): { type: string; data: unknown }[] }) =>
       (session.snapshotEvents().filter(event => event.type === 'sandbox/mode').at(-1)?.data as { mode?: string } | undefined)?.mode
     ctx.provide('sandboxPolicy', { overrideOf: modeOf, resolve: ({ session }: { session?: Parameters<typeof modeOf>[0] } = {}) =>
       ({ mode: (session && modeOf(session)) ?? 'workspace-write', workspaceRoot: workspace }) } as never)
   }
-  await ctx.plugin(LocalBashExecutor, { timeoutMs: 5000 })
-  if (options.jobs) { await ctx.plugin(LocalJobs); await ctx.plugin(ToolJobs, {}) }
-  await ctx.plugin(ToolBash, { enableRunInBackground: options.jobs ?? false })
+  await mountNativeShell(ctx, { dshHome: join(root, 'home'), timeoutMs: process.platform === 'win32' ? 15_000 : 5000, jobs: options.jobs })
   if (options.files) {
     if (options.toolMode !== 'both') await ctx.plugin(LocalFileSystem, { cwd: workspace })
     if (!options.presetTools) await ctx.plugin(ToolFs, {})
@@ -172,7 +184,7 @@ async function setup(script: Script, workerScript?: Script, options: {
     maxNativeRequests: options.maxRequests ?? 100, maxReservedOutputTokens: 1_000_000,
   })
   const coordinator = new FusionCoordinator(ctx, store, { profile: { profile, prompts }, leaseRoot: join(root, 'leases'),
-    workerTools: [...(options.jobs ? ['bash', 'job_output', 'job_kill'] : ['bash']), ...(options.files ? ['read', 'write', 'edit'] : [])], keepaliveClock: options.clock,
+    workerTools: [...(options.jobs ? [shellTool, 'job_output', 'job_kill'] : [shellTool]), ...(options.files ? ['read', 'write', 'edit'] : [])], keepaliveClock: options.clock,
     commandMaxSeconds: options.commandMaxSeconds,
     maxWorkerSteps: options.maxWorkerSteps, maxReworkRounds: options.maxReworkRounds,
     authorizeRequest: () => { /* scripted in-process adapter: no upstream or bill */ },
@@ -183,14 +195,15 @@ async function setup(script: Script, workerScript?: Script, options: {
   return { ctx, parent, coordinator, store, adapter, taskId, workspace, selectionRef, authorization, modelContext }
 }
 
-const delegate = (block = true) => toolCallResponse('delegate', 'fusion_delegate', {
+const delegate = (block = true, checkTimeoutSeconds?: number) => toolCallResponse('delegate', 'fusion_delegate', {
   block,
   goal: 'Correct addition', brief: 'Fix calc.py add and preserve the test. Submit a report after implementing.',
   constraints: ['Do not change test_calc.py'], allowedPaths: ['calc.py'],
-  checks: [{ id: 'addition', description: 'Existing addition test passes', command: 'python3 -B -m unittest -v test_calc',
-    kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }],
+  checks: [{ id: 'addition', description: 'Existing addition test passes', command: py('python3 -B -m unittest -v test_calc'),
+    kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'],
+    ...(checkTimeoutSeconds === undefined ? {} : { timeoutSeconds: checkTimeoutSeconds }) }],
 })
-const edit = (id = 'edit') => toolCallResponse(id, 'bash', { command: "printf 'def add(a, b):\\n    return a + b\\n' > calc.py", description: 'Correct the addition implementation' })
+const edit = (id = 'edit') => toolCallResponse(id, shellTool, { command: shellCommand("printf 'def add(a, b):\\n    return a + b\\n' > calc.py", "[IO.File]::WriteAllText((Join-Path $PWD 'calc.py'), \"def add(a, b):`n    return a + b`n\")"), description: 'Correct the addition implementation' })
 const report = (id = 'report') => toolCallResponse(id, 'fusion_submit_result', { summary: 'Corrected add in calc.py.', status: 'completed', unresolved: [] })
 const review = (decision: 'accept' | 'rework') => toolCallResponse(`review-${decision}`, 'fusion_review_result', { decision, reason: decision === 'accept' ? 'The implementation adds both inputs and the frozen native test passed.' : 'The candidate needs a further implementation pass.' })
 /** enforced-v3 handoff: the user's hard requirement quoted verbatim ('addition' occurs in the v3 test prompts). */
@@ -198,7 +211,7 @@ const delegateV3 = (block = true, requirements = ['addition']) => toolCallRespon
   block, requirements,
   goal: 'Correct addition', brief: 'Fix calc.py add and preserve the test. Submit a report after implementing.',
   constraints: ['Do not change test_calc.py'], allowedPaths: ['calc.py'],
-  checks: [{ id: 'addition', description: 'Existing addition test passes', command: 'python3 -B -m unittest -v test_calc',
+  checks: [{ id: 'addition', description: 'Existing addition test passes', command: py('python3 -B -m unittest -v test_calc'),
     kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }],
 })
 const acceptV3 = (id = 'review-accept') => toolCallResponse(id, 'fusion_review_result', { decision: 'accept',
@@ -218,7 +231,7 @@ describe('delegation preflight and direct preparation', () => {
   const withDefinitions = (paths: string[]) => toolCallResponse('invalid-delegate', 'fusion_delegate', {
     goal: 'Correct addition', brief: 'Fix calc.py and add regression tests when needed.',
     constraints: ['Preserve existing tests'], allowedPaths: ['calc.py', 'future_test.py'],
-    checks: [{ id: 'addition', description: 'Existing and new tests pass', command: 'python3 -B -m unittest -v test_calc',
+    checks: [{ id: 'addition', description: 'Existing and new tests pass', command: py('python3 -B -m unittest -v test_calc'),
       kind: 'test', parser: 'unittest', definitionPaths: paths }],
   })
 
@@ -242,7 +255,7 @@ describe('delegation preflight and direct preparation', () => {
     const { parent, coordinator, store, adapter, taskId, workspace } = await setup([
       toolCallResponse('take', 'fusion_takeover', { reason: 'Prepare a small local note before delegating.' }),
       withDefinitions(['test_calc.py', 'future_test.py']),
-      toolCallResponse('prepare', 'bash', { command: "printf 'prepared\\n' > prep.txt", description: 'Finish direct preparation' }),
+      toolCallResponse('prepare', shellTool, { command: shellCommand("printf 'prepared\\n' > prep.txt", "[IO.File]::WriteAllText((Join-Path $PWD 'prep.txt'), \"prepared`n\")"), description: 'Finish direct preparation' }),
       delegate(), review('accept'), textResponse('Verified.'),
     ], [edit(), report()], { files: true })
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Prepare a note, then delegate the addition fix.' }] }))
@@ -264,8 +277,8 @@ describe('delegation preflight and direct preparation', () => {
     expect(events.slice(0, handoff).some(event => event.type === 'lease/released')).toBe(true)
     expect(events.slice(0, handoff).some(event => event.type === 'task/completed')).toBe(false)
     const leadRequests = adapter.requests.filter(request => request.model === 'lead')
-    expect(leadRequests[2]!.tools!.some(tool => tool.name === 'bash')).toBe(true)
-    expect(leadRequests[4]!.tools!.some(tool => tool.name === 'bash')).toBe(false)
+    expect(leadRequests[2]!.tools!.some(tool => tool.name === shellTool)).toBe(true)
+    expect(leadRequests[4]!.tools!.some(tool => tool.name === shellTool)).toBe(false)
   })
 
   it('keeps a live direct job and its writer until collection, then delegates without replaying the job', async () => {
@@ -277,7 +290,7 @@ describe('delegation preflight and direct preparation', () => {
     ], [edit(), report()], { jobs: true })
     gate = join(workspace, '..', 'release-direct-handoff')
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Prepare addition and delegate the final check.' }] }))
-    await vi.waitFor(() => expect(coordinator.effects.waitingForJob(parent)).toBe(true))
+    await waitForNative(() => expect(coordinator.effects.waitingForJob(parent)).toBe(true))
     expect(coordinator.state(taskId).lease?.holder).toBe(parent.id)
     expect(coordinator.state(taskId).acceptedChild).toBeUndefined()
     expect(JSON.stringify(toolResults(parent))).toContain('Settle the current writer and effects')
@@ -311,9 +324,9 @@ describe('read-only exploration before a Lead plan', () => {
     for (const index of [0, 1, 4, 5, 6]) {
       expect(toolNames[index]).toContain('read')
       expect(toolNames[index]).toContain('fusion_delegate')
-      for (const name of ['bash', 'write', 'edit', 'run_code', 'subagent', 'list_subagent_models']) expect(toolNames[index]).not.toContain(name)
+      for (const name of [shellTool, 'write', 'edit', 'run_code', 'subagent', 'list_subagent_models']) expect(toolNames[index]).not.toContain(name)
     }
-    for (const index of [2, 3]) expect(toolNames[index]).toEqual(expect.arrayContaining(['bash', 'write', 'edit', 'run_code']))
+    for (const index of [2, 3]) expect(toolNames[index]).toEqual(expect.arrayContaining([shellTool, 'write', 'edit', 'run_code']))
     expect(toolResults(parent).map(result => result.message).filter(block => block.role === 'tool' && block.isError)).toEqual([])
   })
 
@@ -326,10 +339,10 @@ describe('read-only exploration before a Lead plan', () => {
     expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
     for (const request of adapter.requests.filter(request => request.model === 'lead')) {
       expect(request.tools!.map(tool => tool.name)).toContain('read')
-      for (const name of ['bash', 'write', 'edit', 'run_code']) expect(request.tools!.map(tool => tool.name)).not.toContain(name)
+      for (const name of [shellTool, 'write', 'edit', 'run_code']) expect(request.tools!.map(tool => tool.name)).not.toContain(name)
     }
     for (const request of adapter.requests.filter(request => request.model === 'worker')) {
-      expect(request.tools!.map(tool => tool.name)).toEqual(expect.arrayContaining(['bash', 'write', 'edit', 'run_code']))
+      expect(request.tools!.map(tool => tool.name)).toEqual(expect.arrayContaining([shellTool, 'write', 'edit', 'run_code']))
     }
   })
 
@@ -426,7 +439,7 @@ describe('read-only exploration before a Lead plan', () => {
       [readCalc(), [{ type: 'finish', reason: { kind: 'error', failure: { code: 'FIXTURE_FAILED', message: 'fixture worker failure' } } }]], { files: true })
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition.' }], source: { kind: 'user' } }))
     await parent.whenIdle()
-    await vi.waitFor(() => expect(adapter.requests.filter(request => request.model === 'lead').some(request =>
+    await waitForNative(() => expect(adapter.requests.filter(request => request.model === 'lead').some(request =>
       JSON.stringify(request.messages).includes('failed before it finished'))).toBe(true))
     await parent.whenIdle()
     const afterFailure = adapter.requests.filter(request => request.model === 'lead').at(-1)!
@@ -459,7 +472,7 @@ describe('read-only exploration before a Lead plan', () => {
     const { parent, coordinator, store, adapter, taskId } = await setup([
       toolCallResponse('staged-delegate', 'fusion_delegate', { goal: 'Correct addition and preserve tests.', brief: temporary,
         constraints: ['Do not change test_calc.py'], allowedPaths: ['calc.py'],
-        checks: [{ id: 'addition', description: 'Addition works', command: 'python3 -B -m unittest -v test_calc', kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }] }),
+        checks: [{ id: 'addition', description: 'Addition works', command: py('python3 -B -m unittest -v test_calc'), kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }] }),
       review('accept'), toolCallResponse('stage-two', 'fusion_rework', { feedback: 'Advance to stage two: implement addition in calc.py.' }),
       review('accept'), textResponse('Both stages completed.'),
     ], [toolCallResponse('stage-one-report', 'fusion_submit_result', { summary: 'Inspected the defect.', status: 'completed', unresolved: ['Addition still needs correction in stage two.'] }), edit(), report()])
@@ -502,7 +515,7 @@ describe('read-only exploration before a Lead plan', () => {
     for (const request of exploration) {
       expect(request.tools?.map(tool => tool.name).sort()).toEqual(['fusion_read_evidence', 'fusion_submit_result', 'read'])
     }
-    expect(implementation.tools?.map(tool => tool.name)).toEqual(expect.arrayContaining(['bash', 'write', 'edit', 'read', 'fusion_submit_result']))
+    expect(implementation.tools?.map(tool => tool.name)).toEqual(expect.arrayContaining([shellTool, 'write', 'edit', 'read', 'fusion_submit_result']))
     expect(JSON.stringify(implementation.messages)).toContain('findings')
     expect(taskSnapshot(implementation).exploration.workOrderId).toBe(orders[0]!.payload.order.id)
     const activity = readFusionActivity(store, parent.id, 'explore')
@@ -520,13 +533,14 @@ describe('read-only exploration before a Lead plan', () => {
       report('missing-sources'), findings()], { files: true })
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Explore before implementation.' }] }))
     await parent.whenIdle()
-    const state = coordinator.state(taskId), child = ctx.agents.get(SessionId(state.acceptedChild!))!
-    const rejected = toolResults(child).map(result => result.message)
+    const state = coordinator.state(taskId)
+    const childToolResults = await persistedToolResults(ctx, state.acceptedChild!)
+    const rejected = childToolResults.map(result => result.message)
       .filter(block => block.role === 'tool' && ['forbidden-shell', 'forbidden-write'].includes(block.toolCallId))
     expect(rejected).toHaveLength(2)
     expect(rejected.every(block => block.role === 'tool' && block.isError)).toBe(true)
     expect(JSON.stringify(rejected)).toContain('Exploration is read-only')
-    expect(JSON.stringify(toolResults(child))).toContain('requires 1–12 source ranges')
+    expect(JSON.stringify(childToolResults)).toContain('requires 1–12 source ranges')
     expect(JSON.stringify(toolResults(parent))).toContain('before recording a review')
     expect(JSON.stringify(toolResults(parent))).toContain('Exploration cannot grant a writer')
     expect(state).toMatchObject({ phase: 'PLANNING', verification: 'unverified', control: { mode: 'running' } })
@@ -539,7 +553,7 @@ describe('read-only exploration before a Lead plan', () => {
   it('requires collection before promotion and supports a nonblocking exploration wait', async () => {
     const next = toolCallResponse('implementation-plan', 'fusion_delegate', {
       goal: 'Fix addition', brief: 'Use addition in calc.py.', constraints: [], allowedPaths: ['calc.py'],
-      checks: [{ id: 'addition', description: 'Addition works', command: 'python3 -B -m unittest -v test_calc', kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }],
+      checks: [{ id: 'addition', description: 'Addition works', command: py('python3 -B -m unittest -v test_calc'), kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }],
     })
     const { parent, coordinator, taskId } = await setup([
       explore(false), delegate(), toolCallResponse('wait-exploration', 'fusion_wait', {}), next, review('accept'), textResponse('Done.'),
@@ -573,14 +587,14 @@ describe('read-only exploration before a Lead plan', () => {
       expect(request.tools?.map(tool => tool.name).sort()).toEqual(['fusion_read_evidence', 'fusion_submit_result', 'read'])
     }
     for (const request of requests.filter(request => taskSnapshot(request).workOrder.mode === 'implement')) {
-      expect(request.tools?.map(tool => tool.name)).toEqual(expect.arrayContaining(['bash', 'write', 'edit', 'run_code']))
+      expect(request.tools?.map(tool => tool.name)).toEqual(expect.arrayContaining([shellTool, 'write', 'edit', 'run_code']))
     }
     const ordinary = (await ctx.agents.create({ sessionId: SessionId('ordinary-mixed'), meta: { cwd: parent.session.header.cwd },
       agentOptions: { provider: 'test-native', model: 'ordinary' } })).agent
     ordinary.followup(createUserMessage({ content: [{ type: 'text', text: 'Hello.' }] }))
     await ordinary.whenIdle()
     const ordinaryTools = adapter.requests.at(-1)!.tools!.map(tool => tool.name)
-    expect(ordinaryTools).toEqual(expect.arrayContaining(['bash', 'write', 'edit', 'run_code']))
+    expect(ordinaryTools).toEqual(expect.arrayContaining([shellTool, 'write', 'edit', 'run_code']))
     expect(ordinaryTools.some(name => name.startsWith('fusion_'))).toBe(false)
     expect(store.listDocumentIds('child:')).toHaveLength(1)
   })
@@ -603,7 +617,7 @@ describe('read-only exploration before a Lead plan', () => {
     expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
     expect(() => readFileSync(join(workspace, 'must-not-exist'))).toThrow()
     expect(requests.filter(request => taskSnapshot(request).workOrder.mode === 'implement').every(request =>
-      request.tools?.some(tool => tool.name === 'write') && request.tools.some(tool => tool.name === 'bash'))).toBe(true)
+      request.tools?.some(tool => tool.name === 'write') && request.tools.some(tool => tool.name === shellTool))).toBe(true)
   })
 
   it('keeps exploration feedback separate from implementation feedback on the same persistent Worker', async () => {
@@ -628,14 +642,31 @@ describe('read-only exploration before a Lead plan', () => {
     const { parent, coordinator, adapter, ctx, store, taskId } = await setup([
       explore(), textResponse('Findings received; awaiting the implementation decision.'), delegate(), review('accept'), textResponse('Done.'),
     ], [findings(), edit(), report()])
+    // A native subagent-settled notice can wake the Lead after its text reply.
+    // This fixture's implementation decision belongs to the next user message,
+    // so an extra notice must not consume the scripted delegate prematurely.
+    let implementationApproved = false
+    const stream = adapter.stream.bind(adapter)
+    vi.spyOn(adapter, 'stream').mockImplementation(async function* (request) {
+      if (!implementationApproved && request.model === 'lead'
+        && adapter.requests.filter(item => item.model === 'lead').length >= 2) {
+        adapter.requests.push(request)
+        yield* textResponse('Findings received; awaiting the implementation decision.')
+        return
+      }
+      yield* stream(request)
+    })
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Inspect addition first.' }] }))
     await parent.whenIdle()
+    expect(coordinator.state(taskId)).toMatchObject({ phase: 'PLANNING',
+      currentWorkOrder: { mode: 'explore' }, exploration: { status: 'completed' } })
     const child = coordinator.state(taskId).acceptedChild, calls = adapter.requests.length
     await coordinator.close()
     const restored = new FusionCoordinator(ctx, store, coordinator.options)
     cleanups.push(async () => restored.close())
     expect(restored.state(taskId).control).toMatchObject({ mode: 'running', recovering: false })
     expect(adapter.requests).toHaveLength(calls)
+    implementationApproved = true
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Implement your plan now.' }] }))
     await parent.whenIdle()
     expect(restored.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED', verification: 'verified', acceptedChild: child })
@@ -658,7 +689,7 @@ describe('read-only exploration before a Lead plan', () => {
       delegate(), review('accept'), textResponse('Done.'),
     ], ['hang-slow', readCalc(), findings(), edit(), report()], { files: true })
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Explore and fix addition.' }] }))
-    await vi.waitFor(() => expect(adapter.requests).toHaveLength(2))
+    await waitForNative(() => expect(adapter.requests).toHaveLength(2))
     const child = coordinator.state(taskId).acceptedChild
     await coordinator.pause(parent)
     expect(coordinator.state(taskId)).toMatchObject({ phase: 'PAUSED', currentWorkOrder: { mode: 'explore' } })
@@ -714,7 +745,7 @@ describe('single conversation activity', () => {
     expect(parentMessages).not.toContain('one-native-job-effect')
     expect(adapter.requests.filter(request => request.model === 'lead').every(request =>
       !JSON.stringify(request.messages).includes('Correct the addition implementation'))).toBe(true)
-    expect(activityRows(events)).toMatchObject([{ call: { data: { name: 'bash' } }, result: { type: 'tool/result' } }])
+    expect(activityRows(events)).toMatchObject([{ call: { data: { name: shellTool } }, result: { type: 'tool/result' } }])
     const requests = adapter.requests.length, content = readFileSync(join(workspace, 'calc.py'), 'utf8')
     await coordinator.activity.close()
     const restored = new NativeFusionActivity(ctx, store)
@@ -823,9 +854,10 @@ describe('bounded Worker continuations', () => {
   })
 
   it('restores a legacy runtime without a continuation counter while retaining its historical rework count', async () => {
-    const { ctx, parent, coordinator, store, taskId } = await setup([
+    const { ctx, parent, coordinator, adapter, store, taskId } = await setup([
       delegate(), textResponse('The Worker turn was truncated.'), feedback('cold-continuation'), review('accept'), textResponse('Implemented and checked.'),
     ], [maxTokensResponse('Incomplete.'), edit(), report()])
+    const allowFollowup = holdLeadForFollowup(adapter)
     await run(parent)
     const child = coordinator.bindings.read(parent.id)!.binding.workerId!
     await coordinator.close()
@@ -838,6 +870,7 @@ describe('bounded Worker continuations', () => {
     cleanups.push(async () => restored.close())
     await restored.reconcile(parent, { commandId: 'inspect-legacy', note: 'The truncated Worker stopped without executing any tool; inspected unchanged calc.py and test_calc.py.' })
     await restored.resume(parent, 'scripted-fixture')
+    allowFollowup()
     await run(parent)
     expect(restored.bindings.read(parent.id)!.binding.workerId).toBe(child)
     expect(restored.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
@@ -907,7 +940,7 @@ describe('exhausted Worker feedback', () => {
     cleanups.push(async () => { release(); dispose() })
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Correct addition.' }] }))
     await parent.whenIdle()
-    await vi.waitFor(() => expect(coordinator.effects.pending(taskId)).toHaveLength(1))
+    await waitForNative(() => expect(coordinator.effects.pending(taskId)).toHaveLength(1))
     const child = ctx.agents.get(SessionId(coordinator.state(taskId).acceptedChild!))!
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Check whether feedback can be sent.' }] }))
     await parent.whenIdle()
@@ -1123,16 +1156,20 @@ describe('automatic role response limits', () => {
   })
 })
 
-const shellQuote = (text: string) => "'" + text.replaceAll("'", "'\"'\"'") + "'"
-const backgroundEdit = (gate: string) => toolCallResponse('background-edit', 'bash', {
-  command: 'python3 -c ' + shellQuote('from pathlib import Path\nimport time\n'
+// POSIX escapes embedded ' via '"'"'; pwsh doubles it. Same result either way for
+// quotes-free payloads.
+const shellQuote = (text: string) => process.platform === 'win32'
+  ? "'" + text.replaceAll("'", "''") + "'"
+  : "'" + text.replaceAll("'", "'\"'\"'") + "'"
+const backgroundEdit = (gate: string) => toolCallResponse('background-edit', shellTool, {
+  command: py('python3 -c ') + shellQuote('from pathlib import Path\nimport time\n'
     + `gate = Path(${JSON.stringify(gate)})\n`
     + 'while not gate.exists(): time.sleep(0.01)\n'
     + 'Path("calc.py").write_text("def add(a, b):\\n    return a + b\\n# one-native-job-effect\\n")\n'),
   description: 'Wait for the fixture then correct addition', run_in_background: true,
 })
 function waitForJob(request: GenerateOptions, callId = 'wait-job') {
-  const id = JSON.stringify(request.messages).match(/started background job (bash-\d+)/)?.[1]
+  const id = JSON.stringify(request.messages).match(new RegExp(`started background job (${shellTool}-\\d+)`))?.[1]
   if (!id) throw new Error('The actual native job identity is absent from Worker history')
   return toolCallResponse(callId, 'job_output', { job_id: id, wait: true, timeout_ms: 10_000 })
 }
@@ -1148,7 +1185,7 @@ describe('owned native background commands', () => {
     ], undefined, { jobs: true })
     gate = join(workspace, '..', 'release-after-lead-interruption')
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition directly.' }] }))
-    await vi.waitFor(() => expect(coordinator.effects.waitingForJob(parent)).toBe(true))
+    await waitForNative(() => expect(coordinator.effects.waitingForJob(parent)).toBe(true))
     const job = coordinator.effects.pending(taskId).find(row => row.record.nativeJob)!.record.nativeJob!
     const calls = adapter.requests.length
     parent.cancel({ kind: 'user' }, { keepInbox: true })
@@ -1158,13 +1195,13 @@ describe('owned native background commands', () => {
     expect(adapter.requests).toHaveLength(calls)
     expect(coordinator.effects.waitingForJob(parent)).toBe(false)
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Continue waiting on the original job.' }] }))
-    await vi.waitFor(() => expect(coordinator.effects.waitingForJob(parent)).toBe(true))
+    await waitForNative(() => expect(coordinator.effects.waitingForJob(parent)).toBe(true))
     expect(ctx.jobs.get(JobId(job.id), parent.id).status).toBe('running')
     writeFileSync(gate, 'release')
     await parent.whenIdle()
     expect(coordinator.state(taskId).phase).toBe('COMPLETED')
     expect(coordinator.state(taskId).verification).toBe('unverified')
-    expect(parent.session.snapshotEvents().filter(event => event.type === 'tool/call' && event.data.name === 'bash')).toHaveLength(1)
+    expect(parent.session.snapshotEvents().filter(event => event.type === 'tool/call' && event.data.name === shellTool)).toHaveLength(1)
     expect(readFileSync(join(workspace, 'calc.py'), 'utf8').match(/one-native-job-effect/g)).toHaveLength(1)
   })
 
@@ -1175,9 +1212,9 @@ describe('owned native background commands', () => {
     ], [() => backgroundEdit(gate), request => waitForJob(request)], { jobs: true })
     gate = join(workspace, '..', 'never-release-native-cancel')
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition with the Worker.' }] }))
-    await vi.waitFor(() => expect(coordinator.effects.pending(taskId).some(row => row.record.nativeJob)).toBe(true))
+    await waitForNative(() => expect(coordinator.effects.pending(taskId).some(row => row.record.nativeJob)).toBe(true))
     const child = ctx.agents.get(SessionId(coordinator.state(taskId).acceptedChild!))!
-    await vi.waitFor(() => expect(coordinator.effects.waitingForJob(child)).toBe(true))
+    await waitForNative(() => expect(coordinator.effects.waitingForJob(child)).toBe(true))
     const job = coordinator.effects.pending(taskId).find(row => row.record.nativeJob)!.record.nativeJob!
     const calls = adapter.requests.length
     parent.cancel({ kind: 'user' }, { keepInbox: true })
@@ -1209,17 +1246,17 @@ describe('owned native background commands', () => {
     gate = join(workspace, '..', 'release-native-job')
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition and verify.' }] }))
     if (!blocking) await parent.whenIdle()
-    await vi.waitFor(() => expect(coordinator.effects.pending(taskId).some(row => row.record.nativeJob)).toBe(true))
+    await waitForNative(() => expect(coordinator.effects.pending(taskId).some(row => row.record.nativeJob)).toBe(true))
     const childId = coordinator.state(taskId).acceptedChild!
     const child = ctx.agents.get(SessionId(childId))!
-    await vi.waitFor(() => expect(coordinator.effects.waitingForJob(child)).toBe(true))
+    await waitForNative(() => expect(coordinator.effects.waitingForJob(child)).toBe(true))
     const job = coordinator.effects.pending(taskId).find(row => row.record.nativeJob)!.record.nativeJob!
     expect(ctx.jobs.get(JobId(job.id), child.id).status).toBe('running')
     expect(coordinator.state(taskId).lease?.holder).toBe(childId)
     const revision = createUserMessage({ content: [{ type: 'text', text: 'Apply my revision to the same command.' }], source: { kind: 'user' } })
     if (blocking) parent.steer(revision)
     else parent.followup(revision)
-    await vi.waitFor(() => expect(adapter.requests.filter(row => row.model === 'worker')).toHaveLength(3))
+    await waitForNative(() => expect(adapter.requests.filter(row => row.model === 'worker')).toHaveLength(3))
     expect(ctx.jobs.get(JobId(job.id), child.id).status).toBe('running')
     expect(coordinator.state(taskId).acceptedChild).toBe(childId)
     expect(coordinator.state(taskId).lease?.holder).toBe(childId)
@@ -1231,7 +1268,7 @@ describe('owned native background commands', () => {
     // the plugin's durable job record remain available.
     expect(JSON.stringify(toolResults(child))).toContain('status: completed')
     expect(readFileSync(join(workspace, 'calc.py'), 'utf8').match(/one-native-job-effect/g)).toHaveLength(1)
-    expect(child.session.snapshotEvents().filter(event => event.type === 'tool/call' && event.data.name === 'bash')).toHaveLength(1)
+    expect(child.session.snapshotEvents().filter(event => event.type === 'tool/call' && event.data.name === shellTool)).toHaveLength(1)
     expect(store.listDocumentIds(`native-effect:${taskId}:`).some(id => {
       const row = store.readDocument(id)!.value as { nativeJob?: { status: string }; state: string }
       return row.nativeJob?.status === 'completed' && row.state === 'returned'
@@ -1246,9 +1283,9 @@ describe('owned native background commands', () => {
     gate = join(workspace, '..', 'never-release-native-job')
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition.' }] }))
     await parent.whenIdle()
-    await vi.waitFor(() => expect(adapter.requests.filter(row => row.model === 'worker')).toHaveLength(3))
+    await waitForNative(() => expect(adapter.requests.filter(row => row.model === 'worker')).toHaveLength(3))
     const child = ctx.agents.get(SessionId(coordinator.state(taskId).acceptedChild!))!
-    await vi.waitFor(() => expect(coordinator.effects.waitingForJob(child)).toBe(true))
+    await waitForNative(() => expect(coordinator.effects.waitingForJob(child)).toBe(true))
     const job = coordinator.effects.pending(taskId).find(row => row.record.nativeJob)!.record.nativeJob!
     expect(JSON.stringify(toolResults(child))).toContain('settle effects before submitting')
     const callsBeforePause = adapter.requests.length
@@ -1277,7 +1314,7 @@ describe('owned native background commands', () => {
     ], { jobs: true })
     let finish!: (result: { status: 'killed' }) => void
     const done = new Promise<{ status: 'killed' }>(resolve => { finish = resolve })
-    foreign = ctx.jobs.start({ kind: 'bash', label: 'PRIVATE-UNOWNED-JOB', run: () => ({
+    foreign = ctx.jobs.start({ kind: shellTool, label: 'PRIVATE-UNOWNED-JOB', run: () => ({
       done, cancel: () => finish({ status: 'killed' }), readOutput: () => 'PRIVATE-UNOWNED-OUTPUT',
     }) })
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition.' }] }))
@@ -1291,16 +1328,19 @@ describe('owned native background commands', () => {
   it('enforces the frozen command deadline without treating a killed command as correct work', async () => {
     let gate = ''
     const { parent, coordinator, taskId, workspace, store } = await setup([
-      delegate(), textResponse('The command did not complete the task.'),
+      // The one-second limit targets the Worker job. Give the independent
+      // acceptance check time to start PowerShell without being promoted itself.
+      delegate(true, 15), textResponse('The command did not complete the task.'),
     ], [() => backgroundEdit(gate), request => waitForJob(request), report()], { jobs: true, commandMaxSeconds: 1 })
     gate = join(workspace, '..', 'never-release-deadline')
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition.' }] }))
     await parent.whenIdle()
+    expect(coordinator.state(taskId).currentWorkOrder!.policy.commandMaxSeconds).toBe(1)
     expect(coordinator.state(taskId).phase).not.toBe('COMPLETED')
     expect(coordinator.effects.pending(taskId)).toEqual([])
     const records = store.listDocumentIds(`native-effect:${taskId}:`).map(id => store.readDocument(id)!.value)
     expect(records).toEqual(expect.arrayContaining([expect.objectContaining({
-      state: 'returned', nativeJob: expect.objectContaining({ status: 'killed' }),
+      role: 'worker', state: 'returned', nativeJob: expect.objectContaining({ status: 'killed' }),
     })]))
     expect(readFileSync(join(workspace, 'calc.py'), 'utf8')).toContain('return a - b')
   })
@@ -1314,7 +1354,7 @@ describe('owned native background commands', () => {
     ], undefined, { jobs: true })
     gate = join(workspace, '..', 'never-release-direct')
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition directly.' }] }))
-    await vi.waitFor(() => expect(coordinator.effects.waitingForJob(parent)).toBe(true))
+    await waitForNative(() => expect(coordinator.effects.waitingForJob(parent)).toBe(true))
     expect(JSON.stringify(toolResults(parent))).toContain('before completing the direct task')
     const job = coordinator.effects.pending(taskId).find(row => row.record.nativeJob)!.record.nativeJob!
     const calls = adapter.requests.length
@@ -1336,7 +1376,7 @@ describe('owned native background commands', () => {
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition.' }] }))
     await parent.whenIdle()
     const child = ctx.agents.get(SessionId(coordinator.state(taskId).acceptedChild!))!
-    await vi.waitFor(() => expect(coordinator.effects.waitingForJob(child)).toBe(true))
+    await waitForNative(() => expect(coordinator.effects.waitingForJob(child)).toBe(true))
     const job = coordinator.effects.pending(taskId).find(row => row.record.nativeJob)!.record.nativeJob!
     const calls = adapter.requests.length
     const stop = vi.spyOn(ctx.jobs, 'kill').mockImplementation(() => { throw new Error('Producer cancellation failed') })
@@ -1366,7 +1406,7 @@ describe('owned native background commands', () => {
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition.' }] }))
     await parent.whenIdle()
     const child = ctx.agents.get(SessionId(coordinator.state(taskId).acceptedChild!))!
-    await vi.waitFor(() => expect(coordinator.effects.waitingForJob(child)).toBe(true))
+    await waitForNative(() => expect(coordinator.effects.waitingForJob(child)).toBe(true))
     const calls = adapter.requests.length
     await coordinator.close()
     expect(coordinator.effects.pending(taskId)).toEqual([])
@@ -1384,6 +1424,12 @@ describe('owned native background commands', () => {
 
 function toolResults(parent: Awaited<ReturnType<typeof setup>>['parent']) {
   return parent.session.snapshotEvents().filter(event => event.type === 'tool/result').map(event => event.data)
+}
+
+/** Tool/result events of a child whose registry entry may already be gone. */
+async function persistedToolResults(ctx: Context, sessionId: string) {
+  const snapshot = await ctx.sessionQuery.readSession(SessionId(sessionId))
+  return snapshot.events.filter(event => event.type === 'tool/result').map(event => event.data)
 }
 
 function taskSnapshot(request: Awaited<ReturnType<typeof setup>>['adapter']['requests'][number]) {
@@ -1410,7 +1456,7 @@ async function askNative(ctx: Context, role: 'lead' | 'worker' = 'lead') {
   const disposePolicy = ctx.on('tools/pre-execute', async (exec, next) => {
     const prior = await next()
     const matches = role === 'lead' ? exec.agent?.id === 'lead' : exec.agent?.id !== 'lead'
-    return matches && exec.name === 'bash' ? { kind: 'ask', reason: 'Fixture command requires approval' } : prior
+    return matches && exec.name === shellTool ? { kind: 'ask', reason: 'Fixture command requires approval' } : prior
   })
   const disposeAnswer = ctx.on('approval/request', async request => { asked(request); return decision })
   return { pending, answer, dispose: () => { disposeAnswer(); disposePolicy() } }
@@ -1501,7 +1547,7 @@ describe('complete native Fusion workflow', () => {
       const status = readFusionStatus(store, parent.id)
       expect(status.task).toMatchObject({ stage: '完成', verification: 'verified', workerId: coordinator.state(taskId).acceptedChild,
         usage: { calls, actualBilledUsd: null }, pendingApprovals: 0, unsettledTools: 0 })
-      expect(status.task!.tools.some(tool => tool.name === 'bash')).toBe(true)
+      expect(status.task!.tools.some(tool => tool.name === shellTool)).toBe(true)
       expect(status.task!.contexts.map(context => context.role).sort()).toEqual(['lead', 'worker'])
       expect(status.task!.requests.every(request => request.provider === 'test-native')).toBe(true)
     }
@@ -1522,9 +1568,9 @@ describe('complete native Fusion workflow', () => {
       review('accept'), textResponse('Verified after the user revision.'),
     ], ['hang-slow', edit(), report()])
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition.' }], source: { kind: 'user' } }))
-    await vi.waitFor(() => expect(adapter.requests.filter(request => request.model === 'worker')).toHaveLength(1))
+    await waitForNative(() => expect(adapter.requests.filter(request => request.model === 'worker')).toHaveLength(1))
     const leadRequests = waitingTool === 'delegate' ? 1 : 2
-    await vi.waitFor(() => expect(parent.session.snapshotEvents().some(event => event.type === 'tool/call'
+    await waitForNative(() => expect(parent.session.snapshotEvents().some(event => event.type === 'tool/call'
       && event.data.name === `fusion_${waitingTool}`)).toBe(true))
     const childId = coordinator.state(taskId).acceptedChild!
     const child = ctx.agents.get(SessionId(childId))!
@@ -1540,7 +1586,7 @@ describe('complete native Fusion workflow', () => {
     // The native queue's Steer action does exactly this: remove, then steer.
     expect(parent.inbox.remove(revision.id)).toBe(true)
     parent.steer(revision)
-    await vi.waitFor(() => expect(adapter.requests.filter(request => request.model === 'worker')).toHaveLength(3), { timeout: 1500 })
+    await waitForNative(() => expect(adapter.requests.filter(request => request.model === 'worker')).toHaveLength(3), { timeout: 1500 })
     await parent.whenIdle()
     expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified', acceptedChild: childId })
     expect(parent.inbox.hasPending).toBe(false)
@@ -1565,7 +1611,7 @@ describe('complete native Fusion workflow', () => {
     ], ['hang-slow', edit(), report()])
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition.' }] }))
     await parent.whenIdle()
-    await vi.waitFor(() => expect(adapter.requests.filter(request => request.model === 'worker')).toHaveLength(1))
+    await waitForNative(() => expect(adapter.requests.filter(request => request.model === 'worker')).toHaveLength(1))
     const childId = coordinator.state(taskId).acceptedChild!
     const child = ctx.agents.get(SessionId(childId))!
     expect(child.status).not.toBe('idle')
@@ -1632,7 +1678,7 @@ describe('complete native Fusion workflow', () => {
     cleanups.push(async () => { release(); dispose() })
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition.' }] }))
     if (!blocking) await parent.whenIdle()
-    await vi.waitFor(() => expect(coordinator.effects.pending(taskId)).toHaveLength(1))
+    await waitForNative(() => expect(coordinator.effects.pending(taskId)).toHaveLength(1))
     const child = ctx.agents.get(SessionId(coordinator.state(taskId).acceptedChild!))!
     const revision = createUserMessage({ content: [{ type: 'text', text: 'Clarify the report before the edit finishes.' }], source: { kind: 'user' } })
     if (blocking) parent.steer(revision)
@@ -1658,11 +1704,11 @@ describe('complete native Fusion workflow', () => {
   it('drains a detached Worker on native Lead cancellation before releasing the writer', async () => {
     const { parent, coordinator, taskId, adapter, ctx } = await setup([delegate(false), 'hang-slow'], ['hang-slow'])
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition.' }] }))
-    await vi.waitFor(() => expect(adapter.requests).toHaveLength(3))
+    await waitForNative(() => expect(adapter.requests).toHaveLength(3))
     const child = ctx.agents.get(SessionId(coordinator.state(taskId).acceptedChild!))!
     parent.cancel({ kind: 'user' }, { keepInbox: true })
     await parent.whenIdle()
-    await vi.waitFor(() => expect(coordinator.state(taskId).lease).toBeUndefined())
+    await waitForNative(() => expect(coordinator.state(taskId).lease).toBeUndefined())
     expect(child.status).toBe('idle')
     expect(coordinator.state(taskId).control).toMatchObject({ mode: 'paused', recovering: false })
     expect(coordinator.effects.pending(taskId)).toHaveLength(0)
@@ -1677,7 +1723,7 @@ describe('complete native Fusion workflow', () => {
     ], ['hang-slow', edit(), report()])
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition.' }] }))
     await parent.whenIdle()
-    await vi.waitFor(() => expect(adapter.requests.filter(request => request.model === 'worker')).toHaveLength(1))
+    await waitForNative(() => expect(adapter.requests.filter(request => request.model === 'worker')).toHaveLength(1))
     const childId = coordinator.state(taskId).acceptedChild!
     await coordinator.close()
     expect(ctx.agents.get(SessionId(childId))).toBeUndefined()
@@ -1702,7 +1748,7 @@ describe('complete native Fusion workflow', () => {
     ], ['hang-slow', edit(), report()])
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition.' }] }))
     await parent.whenIdle()
-    await vi.waitFor(() => expect(adapter.requests.filter(request => request.model === 'worker')).toHaveLength(1))
+    await waitForNative(() => expect(adapter.requests.filter(request => request.model === 'worker')).toHaveLength(1))
     const childId = coordinator.state(taskId).acceptedChild!
     const closing = coordinator.close()
     const restored = new FusionCoordinator(ctx, store, coordinator.options)
@@ -1734,7 +1780,7 @@ describe('complete native Fusion workflow', () => {
     ], workerScript)
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition.' }] }))
     await parent.whenIdle()
-    await vi.waitFor(() => expect(adapter.requests.filter(request => request.model === 'worker')).toHaveLength(1))
+    await waitForNative(() => expect(adapter.requests.filter(request => request.model === 'worker')).toHaveLength(1))
     const childId = coordinator.state(taskId).acceptedChild
     const write = store.writeDocument.bind(store)
     const fault = vi.spyOn(store, 'writeDocument').mockImplementation((id, revision, value) => {
@@ -1767,7 +1813,7 @@ describe('complete native Fusion workflow', () => {
   it('pauses and drains a blocking wait when native cancellation bypasses the Fusion pause command', async () => {
     const { parent, coordinator, adapter, taskId } = await setup([delegate()], ['hang-slow'])
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition.' }] }))
-    await vi.waitFor(() => expect(adapter.requests).toHaveLength(2))
+    await waitForNative(() => expect(adapter.requests).toHaveLength(2))
     parent.cancel({ kind: 'user' }, { keepInbox: true })
     await parent.whenIdle()
     expect(coordinator.state(taskId)).toMatchObject({ control: { mode: 'paused', recovering: false } })
@@ -1777,13 +1823,13 @@ describe('complete native Fusion workflow', () => {
   it('retains write ownership when background quiescence cannot be proved', async () => {
     const { parent, coordinator, taskId, adapter } = await setup([delegate(false), 'hang-slow'], ['hang-slow'])
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition.' }] }))
-    await vi.waitFor(() => expect(adapter.requests).toHaveLength(3))
+    await waitForNative(() => expect(adapter.requests).toHaveLength(3))
     const childId = coordinator.state(taskId).acceptedChild!
     const failedStop = vi.spyOn(coordinator.transport, 'stop').mockRejectedValue(new Error('Injected native persistence failure'))
     try {
       parent.cancel({ kind: 'user' }, { keepInbox: true })
       await parent.whenIdle()
-      await vi.waitFor(() => expect(coordinator.state(taskId).control.recovering).toBe(true))
+      await waitForNative(() => expect(coordinator.state(taskId).control.recovering).toBe(true))
       expect(coordinator.state(taskId).lease?.holder).toBe(childId)
       await expect(coordinator.resume(parent, 'fixture-only')).rejects.toThrow('recover')
       expect(adapter.requests).toHaveLength(3)
@@ -1803,7 +1849,7 @@ describe('complete native Fusion workflow', () => {
     ], [report('failed-candidate'), 'hang-slow', edit(), report('fixed-candidate')])
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition.' }] }))
     await parent.whenIdle()
-    await vi.waitFor(() => expect(adapter.requests.filter(request => request.model === 'worker')).toHaveLength(2))
+    await waitForNative(() => expect(adapter.requests.filter(request => request.model === 'worker')).toHaveLength(2))
     const childId = coordinator.state(taskId).acceptedChild!
     expect(store.outbox(taskId).find(row => row.kind === 'native-worker')?.state).toBe('result-recorded')
     await coordinator.close()
@@ -1820,7 +1866,7 @@ describe('complete native Fusion workflow', () => {
   })
 
   it.each(['start', 'return'] as const)('recovers a native effect journal failure at %s after inspection', async stage => {
-    const effect = () => toolCallResponse('counted-edit', 'bash', { command: "printf 'def add(a, b):\\n    return a + b\\n' > calc.py; printf 'effect\\n' >> effects.txt", description: 'Apply and count the inspected edit' })
+    const effect = () => toolCallResponse('counted-edit', shellTool, { command: shellCommand("printf 'def add(a, b):\\n    return a + b\\n' > calc.py; printf 'effect\\n' >> effects.txt", "[IO.File]::WriteAllText((Join-Path $PWD 'calc.py'), \"def add(a, b):`n    return a + b`n\"); [IO.File]::AppendAllText((Join-Path $PWD 'effects.txt'), \"effect`n\")"), description: 'Apply and count the inspected edit' })
     const { parent, coordinator, store, adapter, taskId, workspace } = await setup([
       toolCallResponse('takeover', 'fusion_takeover', { reason: 'Small direct edit' }), effect(),
       toolCallResponse('recovered-takeover', 'fusion_takeover', { reason: 'Inspection finished; continue without repeating completed effects' }),
@@ -1842,7 +1888,7 @@ describe('complete native Fusion workflow', () => {
       expect(coordinator.state(taskId).phase).not.toBe('COMPLETED')
       expect(readFileSync(join(workspace, 'calc.py'), 'utf8')).toContain(stage === 'start' ? 'a - b' : 'a + b')
       if (stage === 'start') expect(coordinator.effects.pending(taskId)).toEqual([])
-      else expect(coordinator.effects.pending(taskId)).toMatchObject([{ record: { state: 'outcome-unknown', toolName: 'bash' } }])
+      else expect(coordinator.effects.pending(taskId)).toMatchObject([{ record: { state: 'outcome-unknown', toolName: shellTool } }])
     } finally { failure.mockRestore() }
     expect(coordinator.state(taskId).control.recovering).toBe(true)
     await expect(coordinator.resume(parent, 'scripted-only')).rejects.toThrow('recover')
@@ -1875,7 +1921,7 @@ describe('complete native Fusion workflow', () => {
       const request = await waitForApproval(parent, approval.pending)
       expect(coordinator.state(taskId)).toMatchObject({ phase: 'WAITING_APPROVAL', control: { mode: 'running' } })
       const logical = Object.values(coordinator.state(taskId).pendingApprovals)[0]!
-      expect(logical).toMatchObject({ requestingAgent: parent.id, toolName: 'bash', callId: request.callId, role: 'lead', state: 'pending' })
+      expect(logical).toMatchObject({ requestingAgent: parent.id, toolName: shellTool, callId: request.callId, role: 'lead', state: 'pending' })
       expect(store.readDocument(`native-approval:${taskId}:${logical.nativeRequestId}`)?.value).toMatchObject({ state: 'pending', rootCallId: 'delegate', askedSeq: expect.any(Number) })
       await vi.advanceTimersByTimeAsync(31 * 60_000)
       expect(request.signal?.aborted).toBe(false)
@@ -2046,7 +2092,7 @@ describe('complete native Fusion workflow', () => {
     const ordinary = { provider: 'test-native', model: 'ordinary' }
     parent.session.append('model/selection', ordinary)
     selectionRef.current = ordinary
-    await vi.waitFor(() => expect(coordinator.bindings.read(parent.id)?.binding.selected).toBe(false))
+    await waitForNative(() => expect(coordinator.bindings.read(parent.id)?.binding.selected).toBe(false))
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Hello' }] }))
     await parent.whenIdle()
     expect(adapter.requests.at(-1)?.model, JSON.stringify(parent.session.snapshotEvents().slice(-12))).toBe('ordinary')
@@ -2102,11 +2148,11 @@ describe('complete native Fusion workflow', () => {
       profile: () => coordinator.options.profile, selection: () => selectionRef.current })
     cleanups.push(async () => remove())
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition.' }] }))
-    await vi.waitFor(() => expect(adapter.requests).toHaveLength(2))
+    await waitForNative(() => expect(adapter.requests).toHaveLength(2))
     const ordinary = { provider: 'test-native', model: 'ordinary' }
     parent.session.append('model/selection', ordinary)
     selectionRef.current = ordinary
-    await vi.waitFor(() => expect(coordinator.bindings.read(parent.id)?.binding.selected).toBe(false))
+    await waitForNative(() => expect(coordinator.bindings.read(parent.id)?.binding.selected).toBe(false))
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Hello' }] }))
     await parent.whenIdle()
     expect(adapter.requests.at(-1)?.model).toBe('ordinary')
@@ -2216,7 +2262,7 @@ describe('complete native Fusion workflow', () => {
     const initial = 'FIRST-HANDOFF-ONLY: add both numeric arguments and preserve test_calc.py.'
     const first = toolCallResponse('initial-handoff', 'fusion_delegate', {
       goal: 'Correct addition', brief: initial, constraints: ['Do not change test_calc.py'], allowedPaths: ['calc.py'],
-      checks: [{ id: 'addition', description: 'Existing addition test passes', command: 'python3 -B -m unittest -v test_calc',
+      checks: [{ id: 'addition', description: 'Existing addition test passes', command: py('python3 -B -m unittest -v test_calc'),
         kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }],
     })
     const { ctx, parent, coordinator, adapter, taskId } = await setup([
@@ -2226,15 +2272,20 @@ describe('complete native Fusion workflow', () => {
     ], [textResponse('Previous exploration. '.repeat(4500)).filter(chunk => chunk.type !== 'usage'),
       textResponse('The original handoff was omitted.'), edit(), report()], { workerTarget: 26_000 })
     await ctx.plugin(BasicCompaction, { auto: false, maxTokens: 512 })
+    const allowFollowup = holdLeadForFollowup(adapter)
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition.' }] }))
     await parent.whenIdle()
-    const childId = coordinator.state(taskId).acceptedChild!, child = ctx.agents.get(SessionId(childId))!
-    await child.whenIdle()
+    const childId = coordinator.state(taskId).acceptedChild!, child = ctx.agents.get(SessionId(childId))
+    if (child) await child.whenIdle()
+    const savedChild = await ctx.sessionQuery.readSession(SessionId(childId))
+    expect(savedChild.session.parentSession).toBe(parent.id)
+    expect(savedChild.events.some(event => event.type === 'turn/end')).toBe(true)
     const compactionEnds: unknown[] = []
     cleanups.push(async () => observeCompaction())
     const observeCompaction = ctx.on('session/event', (session, event) => {
       if (session.id === childId && event.type === 'compaction/end') compactionEnds.push(event.data)
     })
+    allowFollowup()
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Continue the existing task.' }] }))
     await parent.whenIdle()
     const continued = adapter.requests.filter(request => request.model === 'worker' && request.purpose === undefined).at(-1)!
@@ -2277,7 +2328,7 @@ describe('complete native Fusion workflow', () => {
         goal: 'Verify the follow-up requirement', brief: 'Preserve the implementation, verify the new work order, and submit a new report.',
         constraints: ['Preserve both existing files'], allowedPaths: ['calc.py'],
         checks: [{ id: 'addition-followup', description: 'The follow-up addition check passes',
-          command: 'python3 -B -m unittest -v test_calc.TestAdd.test_add', kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }],
+          command: py('python3 -B -m unittest -v test_calc.TestAdd.test_add'), kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }],
       }), report('second-task-report'), review('accept'), textResponse('Second task done.'),
       textResponse('A direct follow-up.'),
     ])
@@ -2349,7 +2400,7 @@ describe('complete native Fusion workflow', () => {
       edit(), report(), review('accept'), textResponse('Recovered and verified.'),
     ])
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition.' }] }))
-    await vi.waitFor(() => expect(adapter.requests).toHaveLength(2))
+    await waitForNative(() => expect(adapter.requests).toHaveLength(2))
     const child = coordinator.state(taskId).acceptedChild
     await coordinator.pause(parent)
     await coordinator.close()
@@ -2382,7 +2433,7 @@ describe('complete native Fusion workflow', () => {
       edit(), report(), review('accept'), textResponse('Resumed, fixed and verified.'),
     ])
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition and verify it.' }] }))
-    await vi.waitFor(() => expect(adapter.requests).toHaveLength(2))
+    await waitForNative(() => expect(adapter.requests).toHaveLength(2))
     const child = coordinator.state(taskId).acceptedChild
     await coordinator.pause(parent)
     expect(coordinator.state(taskId)).toMatchObject({ phase: 'PAUSED', control: { mode: 'paused' } })
@@ -2407,13 +2458,13 @@ async function backgroundKeepalive(options: { auxiliary?: Script; maxRequests?: 
   })
   fixture.parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Correct addition.' }] }))
   await fixture.parent.whenIdle()
-  await vi.waitFor(() => expect(fixture.adapter.requests.filter(request => request.model === 'worker')).toHaveLength(1))
+  await waitForNative(() => expect(fixture.adapter.requests.filter(request => request.model === 'worker')).toHaveLength(1))
   return { ...fixture, clock }
 }
 
 describe('optional native cache keepalive', () => {
   it('retains the admitted prefix, uses public admission/accounting, and never writes auxiliary output or tools to either Session', async () => {
-    const ping = toolCallResponse('aux-tool-must-not-execute', 'bash', { command: 'touch unwanted', description: 'Must not run' })
+    const ping = toolCallResponse('aux-tool-must-not-execute', shellTool, { command: shellCommand('touch unwanted', "[IO.File]::WriteAllText((Join-Path $PWD 'unwanted'),'')"), description: 'Must not run' })
     ping.splice(ping.findIndex(chunk => chunk.type === 'usage'), 1,
       { type: 'usage', usage: { inputTokens: 2, outputTokens: 1, cacheReadTokens: 91 } })
     const { parent, ctx, coordinator, adapter, store, clock, taskId, authorization, workspace } = await backgroundKeepalive({ auxiliary: [ping] })
@@ -2424,7 +2475,7 @@ describe('optional native cache keepalive', () => {
     clock.advance(KEEPALIVE_INTERVAL_MS - 1)
     expect(adapter.requests).toHaveLength(3)
     clock.advance(1)
-    await vi.waitFor(() => expect(nativeUsage(store).find(row => row.purpose === 'cache-keepalive')?.outcome).toBe('tool-calls'))
+    await waitForNative(() => expect(nativeUsage(store).find(row => row.purpose === 'cache-keepalive')?.outcome).toBe('tool-calls'))
     const request = adapter.requests.at(-1)!
     expect(request).toMatchObject({ model: 'lead', maxTokens: 1, sessionId: parent.id })
     expect(request.purpose).toBeUndefined()
@@ -2448,7 +2499,7 @@ describe('optional native cache keepalive', () => {
     const { clock, adapter, store } = await backgroundKeepalive({ auxiliary: Array.from({ length: KEEPALIVE_ATTEMPTS }, () => textResponse('x')) })
     for (let i = 1; i <= KEEPALIVE_ATTEMPTS; i++) {
       clock.advance(KEEPALIVE_INTERVAL_MS)
-      await vi.waitFor(() => expect(keepaliveRecords(store).some(row => row.successes === i)).toBe(true))
+      await waitForNative(() => expect(keepaliveRecords(store).some(row => row.successes === i)).toBe(true))
       expect(adapter.requests.filter(request => request.maxTokens === 1)).toHaveLength(i)
     }
     expect(clock.timers.size).toBe(0)
@@ -2467,17 +2518,17 @@ describe('optional native cache keepalive', () => {
     expect(clock.time).toBe(120_000)
     expect([...clock.timers.values()].map(row => row.at)).toEqual([285_000])
     clock.advance(165_000)
-    await vi.waitFor(() => expect(keepaliveRecords(store).some(row => row.successes === 1)).toBe(true))
+    await waitForNative(() => expect(keepaliveRecords(store).some(row => row.successes === 1)).toBe(true))
     expect(clock.time).toBe(485_000)
     expect([...clock.timers.values()].map(row => row.at)).toEqual([570_000])
     clock.advance(85_000)
-    await vi.waitFor(() => expect(adapter.requests.filter(request => request.maxTokens === 1)).toHaveLength(2))
+    await waitForNative(() => expect(adapter.requests.filter(request => request.maxTokens === 1)).toHaveLength(2))
   })
 
   it('stops on failure and does not infer absent usage fields or refund reservations', async () => {
     const { clock, adapter, store, authorization } = await backgroundKeepalive({ auxiliary: [] })
     clock.advance(KEEPALIVE_INTERVAL_MS)
-    await vi.waitFor(() => expect(keepaliveRecords(store).some(row => row.stopReason === 'request-failed')).toBe(true))
+    await waitForNative(() => expect(keepaliveRecords(store).some(row => row.stopReason === 'request-failed')).toBe(true))
     expect(clock.timers.size).toBe(0)
     expect(nativeUsage(store).find(row => row.purpose === 'cache-keepalive')).toMatchObject({ outcome: 'error',
       upstreamHttpCalls: null, actualSubscriptionChargeUsd: null, apiEquivalentCostUsd: null })
@@ -2489,7 +2540,7 @@ describe('optional native cache keepalive', () => {
   it('makes no ping when the shared request allowance is exhausted', async () => {
     const { clock, adapter, store } = await backgroundKeepalive({ maxRequests: 3 })
     clock.advance(KEEPALIVE_INTERVAL_MS)
-    await vi.waitFor(() => expect(keepaliveRecords(store).some(row => row.stopReason === 'request-failed')).toBe(true))
+    await waitForNative(() => expect(keepaliveRecords(store).some(row => row.stopReason === 'request-failed')).toBe(true))
     expect(adapter.requests).toHaveLength(3)
     expect(nativeUsage(store).filter(row => row.purpose === 'cache-keepalive')).toEqual([])
     expect(clock.timers.size).toBe(0)
@@ -2498,7 +2549,7 @@ describe('optional native cache keepalive', () => {
   it('aborts and drains an in-flight ping on pause, retaining its reservation and requiring a fresh normal generation after resume', async () => {
     const { parent, coordinator, store, adapter, clock } = await backgroundKeepalive({ auxiliary: ['hang-slow'] })
     clock.advance(KEEPALIVE_INTERVAL_MS)
-    await vi.waitFor(() => expect(adapter.requests).toHaveLength(4))
+    await waitForNative(() => expect(adapter.requests).toHaveLength(4))
     const signal = adapter.requests.at(-1)!.signal!
     await coordinator.pause(parent)
     expect(signal.aborted).toBe(true)
@@ -2514,7 +2565,7 @@ describe('optional native cache keepalive', () => {
       auxiliary: ['hang-slow'], lead: [delegate(false), textResponse('Working.'), textResponse('Still working.')],
     })
     clock.advance(KEEPALIVE_INTERVAL_MS)
-    await vi.waitFor(() => expect(adapter.requests).toHaveLength(4))
+    await waitForNative(() => expect(adapter.requests).toHaveLength(4))
     const old = adapter.requests.at(-1)!
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Please keep going.' }] }))
     await parent.whenIdle()
@@ -2566,7 +2617,7 @@ describe('optional native cache keepalive', () => {
     const { clock, store } = await backgroundKeepalive({ enabled: false, lead: [delegate(false), cached('Worker started.')] })
     expect(clock.timers.size).toBe(1)
     clock.advance(KEEPALIVE_INTERVAL_MS)
-    await vi.waitFor(() => expect(keepaliveRecords(store).some(row => row.successes === 1)).toBe(true))
+    await waitForNative(() => expect(keepaliveRecords(store).some(row => row.successes === 1)).toBe(true))
   })
 
   it('pings at the per-model interval the user set and records each ping for the settings page', async () => {
@@ -2576,12 +2627,12 @@ describe('optional native cache keepalive', () => {
     fixture.coordinator.cachePolicy.save('test-native', 'lead', { intervalSeconds: 600 })
     fixture.parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Correct addition.' }] }))
     await fixture.parent.whenIdle()
-    await vi.waitFor(() => expect(fixture.adapter.requests.filter(request => request.model === 'worker')).toHaveLength(1))
+    await waitForNative(() => expect(fixture.adapter.requests.filter(request => request.model === 'worker')).toHaveLength(1))
     expect([...clock.timers.values()].map(timer => timer.at)).toEqual([600_000])
     clock.advance(KEEPALIVE_INTERVAL_MS)
     expect(keepaliveRecords(fixture.store).every(row => row.attempts === 0)).toBe(true)
     clock.advance(600_000 - KEEPALIVE_INTERVAL_MS)
-    await vi.waitFor(() => expect(fixture.coordinator.cachePolicy.stats('test-native', 'lead')?.totals.pings).toBe(1))
+    await waitForNative(() => expect(fixture.coordinator.cachePolicy.stats('test-native', 'lead')?.totals.pings).toBe(1))
     expect(fixture.coordinator.cachePolicy.stats('test-native', 'lead')!.samples.at(-1)).toMatchObject({ ping: true, gapSeconds: 600 })
   })
 
@@ -2602,7 +2653,7 @@ describe('cache keepalive control boundaries', () => {
     const { clock, store, adapter, modelContext, coordinator, taskId, authorization } = await backgroundKeepalive()
     modelContext.window = 100
     clock.advance(KEEPALIVE_INTERVAL_MS)
-    await vi.waitFor(() => expect(keepaliveRecords(store).some(row => row.stopReason === 'request-failed')).toBe(true))
+    await waitForNative(() => expect(keepaliveRecords(store).some(row => row.stopReason === 'request-failed')).toBe(true))
     expect(nativeUsage(store).filter(row => row.purpose === 'cache-keepalive')).toEqual([])
     expect(adapter.requests).toHaveLength(3)
     expect(store.readDocument(`budget:${authorization && authorization.authorizationId}`)?.value).toMatchObject({ requests: 3, reservedOutputTokens: 24_000 })
@@ -2654,10 +2705,10 @@ describe('cache keepalive control boundaries', () => {
     cleanups.push(async () => { release(); dispose() })
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Correct addition.' }] }))
     await parent.whenIdle()
-    await vi.waitFor(() => expect(coordinator.effects.pending(taskId)).toHaveLength(1))
+    await waitForNative(() => expect(coordinator.effects.pending(taskId)).toHaveLength(1))
     const child = ctx.agents.get(SessionId(coordinator.state(taskId).acceptedChild!))!
     clock.advance(KEEPALIVE_INTERVAL_MS)
-    await vi.waitFor(() => expect(nativeUsage(store).find(row => row.purpose === 'cache-keepalive')?.outcome).toBe('stop'))
+    await waitForNative(() => expect(nativeUsage(store).find(row => row.purpose === 'cache-keepalive')?.outcome).toBe('stop'))
     expect(nativeUsage(store).find(row => row.purpose === 'cache-keepalive')).toMatchObject({ sessionId: child.id, role: 'worker' })
     expect(adapter.requests.at(-1)).toMatchObject({ model: 'worker', maxTokens: 1 })
     release()
@@ -2669,7 +2720,7 @@ describe('cache keepalive control boundaries', () => {
     const { coordinator, parent, ctx, store, adapter, clock } = await backgroundKeepalive()
     const profile = coordinator.options.profile
     await coordinator.close()
-    const replacement = new FusionCoordinator(ctx, store, { profile, workerTools: ['bash'], keepaliveClock: clock, authorizeRequest: () => undefined })
+    const replacement = new FusionCoordinator(ctx, store, { profile, workerTools: [shellTool], keepaliveClock: clock, authorizeRequest: () => undefined })
     cleanups.push(() => replacement.close())
     expect(replacement.bindings.read(parent.id)?.binding.selected).toBe(true)
     expect(clock.timers.size).toBe(0)
@@ -2686,14 +2737,14 @@ describe('Lead acceptance amendment', () => {
   const missingInterpreter = toolCallResponse('delegate-missing', 'fusion_delegate', {
     goal: 'Correct addition', brief: 'Fix calc.py add and preserve the test. Submit a report after implementing.',
     constraints: ['Do not change test_calc.py'], allowedPaths: ['calc.py', 'test_extra.py'],
-    checks: [{ id: 'addition', description: 'Existing addition test passes', command: 'python3 -B -m unittest -v test_calc && ./fusion-missing-runner',
+    checks: [{ id: 'addition', description: 'Existing addition test passes', command: py('python3 -B -m unittest -v test_calc && ./fusion-missing-runner'),
       kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }],
   })
   const needsDecision = toolCallResponse('review-needs', 'fusion_review_result', { decision: 'needs-decision',
     reason: 'The code is right but the frozen interpreter does not exist on this host (exit 127).' })
   const amend = (definitionPaths: string[], id = 'amend') => toolCallResponse(id, 'fusion_rework', {
     feedback: 'The frozen interpreter is missing on this host. Re-verify with python3; keep the implementation.',
-    checks: [{ id: 'addition', description: 'Existing addition test passes with python3', command: 'python3 -B -m unittest -v test_calc',
+    checks: [{ id: 'addition', description: 'Existing addition test passes with python3', command: py('python3 -B -m unittest -v test_calc'),
       kind: 'test', parser: 'unittest', definitionPaths }],
   })
 
@@ -2708,7 +2759,7 @@ describe('Lead acceptance amendment', () => {
     expect(store.events(taskId).filter(event => event.type === 'work-order/acceptance-amended')).toHaveLength(1)
     const [auditId] = store.listDocumentIds(`acceptance-amendment:${taskId}:`)
     expect(store.readDocument(auditId!)?.value).toMatchObject({
-      before: [{ command: 'python3 -B -m unittest -v test_calc && ./fusion-missing-runner' }], after: [{ command: 'python3 -B -m unittest -v test_calc' }] })
+      before: [{ command: py('python3 -B -m unittest -v test_calc && ./fusion-missing-runner') }], after: [{ command: py('python3 -B -m unittest -v test_calc') }] })
     expect(JSON.stringify(toolResults(parent))).toContain('checkDefinitionProblem')
     expect(coordinator.state(taskId).currentWorkOrder?.acceptance[0]?.description).toContain('python3')
   })
@@ -2728,7 +2779,7 @@ describe('Lead acceptance amendment', () => {
     const { parent, store, taskId } = await setup([
       missingInterpreter, needsDecision, toolCallResponse('amend-swap', 'fusion_rework', {
         feedback: 'Use a different test file.',
-        checks: [{ id: 'addition', description: 'Extra test only', command: 'python3 -B -m unittest -v test_calc',
+        checks: [{ id: 'addition', description: 'Extra test only', command: py('python3 -B -m unittest -v test_calc'),
           kind: 'test', parser: 'unittest', definitionPaths: ['calc.py'] }],
       }), textResponse('Refused.'),
     ], [edit(), report()])
@@ -2779,7 +2830,7 @@ describe('review-only delegation', () => {
   it('rejects an out-of-range per-check timeout before any Worker request', async () => {
     const slow = toolCallResponse('delegate-slow', 'fusion_delegate', {
       goal: 'Correct addition', brief: 'Fix calc.py add.', constraints: [], allowedPaths: ['calc.py'],
-      checks: [{ id: 'addition', description: 'Tests', command: 'python3 -B -m unittest -v test_calc', kind: 'test', parser: 'unittest',
+      checks: [{ id: 'addition', description: 'Tests', command: py('python3 -B -m unittest -v test_calc'), kind: 'test', parser: 'unittest',
         definitionPaths: ['test_calc.py'], timeoutSeconds: 99_999 }],
     })
     const { parent, adapter } = await setup([slow, textResponse('Rejected.')])
@@ -2813,7 +2864,7 @@ describe('model-like native execution', () => {
     expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'unverified' })
     expect(coordinator.state(taskId).lease).toBeUndefined()
     expect(coordinator.state(taskId).acceptedChild).toBeUndefined()
-    expect(adapter.requests[0]!.tools!.some(tool => tool.name === 'bash')).toBe(true)
+    expect(adapter.requests[0]!.tools!.some(tool => tool.name === shellTool)).toBe(true)
     expect(JSON.stringify(adapter.requests)).not.toContain('Fusion task state from the durable ledger')
   })
 
@@ -2832,7 +2883,7 @@ describe('model-like native execution', () => {
 
   it('accepts a minimal delegation with only a command per check', async () => {
     const minimal = toolCallResponse('delegate-minimal', 'fusion_delegate', { goal: 'Correct addition', brief: 'Fix calc.py add.',
-      allowedPaths: ['calc.py'], checks: [{ command: 'python3 -B -m unittest -v test_calc', parser: 'unittest' }] })
+      allowedPaths: ['calc.py'], checks: [{ command: py('python3 -B -m unittest -v test_calc'), parser: 'unittest' }] })
     const { parent, coordinator, taskId } = await setup([minimal, review('accept'), textResponse('Verified.')], [edit(), report()], { modelLike: true })
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Delegate the addition fix.' }] }))
     await parent.whenIdle()
@@ -2884,7 +2935,7 @@ describe('model-like text delegation', () => {
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Summarize the supplied text with your Sidekick.' }] }))
     await parent.whenIdle()
     expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED' })
-    expect(adapter.requests.find(request => request.model === 'worker')!.tools!.some(tool => tool.name === 'bash')).toBe(false)
+    expect(adapter.requests.find(request => request.model === 'worker')!.tools!.some(tool => tool.name === shellTool)).toBe(false)
     expect(store.events(taskId).filter(event => event.type === 'lease/acquired')).toHaveLength(0)
     expect(readFusionStatus(store, parent.id).task?.automatedChecks).toBe(0)
   })
@@ -2948,12 +2999,14 @@ describe('model-like local continuation', () => {
       toolCallResponse('retry-sidekick', 'fusion_rework', { feedback: 'Continue the original assignment.' }),
       review('accept'), textResponse('Verified'),
     ], [providerQuota(), toolCallResponse('recover-state', 'fusion_read_state', {}), edit(), report()], { modelLike: true })
+    const allowFollowup = holdLeadForFollowup(adapter)
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition' }] }))
     await parent.whenIdle()
     const workerId = coordinator.state(taskId).acceptedChild
     const status = readFusionStatus(store, parent.id)
     expect(status.task?.modelControl?.waits.worker?.code).toBe('QUOTA')
     expect(JSON.stringify(toolResults(parent))).toContain('worker-unavailable')
+    allowFollowup()
     await coordinator.modelControl.continue(parent.id, taskId, status.task!.modelControl!.revision)
     await parent.whenIdle()
     expect(coordinator.state(taskId), JSON.stringify({ tools: toolResults(parent), events: coordinator.ctx.agents.get(SessionId(workerId!))?.session.snapshotEvents().slice(-14) })).toMatchObject({ phase: 'COMPLETED', acceptedChild: workerId })
@@ -2970,6 +3023,7 @@ describe('model-like local continuation', () => {
       review('accept'), textResponse('Verified'),
     ], [textResponse('Need clarification'), toolCallResponse('worker-restore', 'fusion_read_state', { limit: 24000 }), edit(), report()], { modelLike: true })
     await ctx.plugin(BasicCompaction, { auto: false, maxTokens: 512 })
+    const allowFollowup = holdLeadForFollowup(adapter)
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Fix addition and preserve the test.' }] }))
     await parent.whenIdle()
     let compacted = false
@@ -2983,6 +3037,7 @@ describe('model-like local continuation', () => {
       return next()
     })
     cleanups.push(async () => dispose())
+    allowFollowup()
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Continue the original task.' }] }))
     await parent.whenIdle()
     expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
@@ -2998,7 +3053,7 @@ describe('model-like local continuation', () => {
   })
 
   it('stops unchanged failing tool attempts but does not cap successful work', async () => {
-    const fail = (id: string) => toolCallResponse(id, 'bash', { command: 'fusion_missing_program', description: 'same attempt' })
+    const fail = (id: string) => toolCallResponse(id, shellTool, { command: 'fusion_missing_program', description: 'same attempt' })
     const { parent, store, adapter } = await setup([fail('1'), fail('2'), fail('3'), fail('4')], undefined, { modelLike: true })
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Try the command' }] }))
     await parent.whenIdle()
@@ -3084,9 +3139,9 @@ describe('adaptive model workflow', () => {
 
   it('transfers direct ownership on delegation and rejects forged Lead effects during review', async () => {
     const { parent, coordinator, adapter, workspace, taskId } = await setup([
-      toolCallResponse('prepare', 'bash', { command: 'printf prepared', description: 'Check native shell' }),
+      toolCallResponse('prepare', shellTool, { command: shellCommand('printf prepared', 'Write-Output prepared'), description: 'Check native shell' }),
       delegate(), edit('forged-lead'),
-      toolCallResponse('ptc', 'run_code', { code: 'await tools.bash({command:"touch ptc-bypass"})' }),
+      toolCallResponse('ptc', 'run_code', { code: shellCommand('await tools.bash({command:"touch ptc-bypass"})', "await tools.pwsh({command:\"[IO.File]::WriteAllText((Join-Path $PWD 'ptc-bypass'),'')\"})") }),
       toolCallResponse('unknown', 'local_effect', {}), review('accept'), textResponse('Verified.'),
     ], [edit(), report()], { ...options, toolMode: 'both' })
     let effects = 0
@@ -3102,7 +3157,7 @@ describe('adaptive model workflow', () => {
     expect(() => readFileSync(join(workspace, 'ptc-bypass'))).toThrow()
     const lead = adapter.requests.filter(request => request.model === 'lead')
     expect(lead[0]!.tools!.map(tool => tool.name)).toContain('run_code')
-    for (const request of lead.slice(2)) for (const name of ['bash', 'write', 'run_code', 'local_effect',
+    for (const request of lead.slice(2)) for (const name of [shellTool, 'write', 'run_code', 'local_effect',
       'fusion_delegate', 'fusion_delegate_text', 'fusion_explore', 'fusion_finish_direct', 'fusion_wait']) {
       expect((request.tools ?? []).map(tool => tool.name)).not.toContain(name)
     }
@@ -3193,7 +3248,7 @@ describe('adaptive model workflow', () => {
 
   it('does not automatically repair a broken acceptance command or pretend it is a code defect', async () => {
     const broken = toolCallResponse('delegate', 'fusion_delegate', { goal: 'Check addition', brief: 'Read and report.',
-      allowedPaths: ['calc.py'], checks: [{ command: 'python3 -c "import sys; sys.exit(127)"' }] })
+      allowedPaths: ['calc.py'], checks: [{ command: shellCommand('python3 -c "import sys; sys.exit(127)"', 'exit 127') }] })
     const { parent, store, coordinator, taskId } = await setup([
       broken, toolCallResponse('decision', 'fusion_review_result', { decision: 'needs-decision', reason: 'The acceptance command returned 127, so its executable setup must be corrected.' }), textResponse('The check could not run.'),
     ], [report()], options)
@@ -3205,15 +3260,17 @@ describe('adaptive model workflow', () => {
   })
 
   it('resumes text delegation after explicit continuation without requiring a workspace lease', async () => {
-    const { parent, coordinator, store, taskId } = await setup([
+    const { parent, coordinator, adapter, store, taskId } = await setup([
       toolCallResponse('text', 'fusion_delegate_text', { goal: 'Summarize the supplied sentence', brief: 'Summarize: the library opens at nine.', constraints: [] }),
       textResponse('Sidekick needs quota recovery.'), toolCallResponse('wait', 'fusion_wait', {}), review('accept'), textResponse('Opens at nine.'),
     ], [providerQuota(), toolCallResponse('restore', 'fusion_read_state', {}),
       toolCallResponse('report', 'fusion_submit_result', { summary: 'The library opens at nine.', status: 'completed', unresolved: [] })],
     { ...options, noCwd: true })
+    const allowFollowup = holdLeadForFollowup(adapter)
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Summarize the supplied sentence.' }] }))
     await parent.whenIdle()
     const workerId = coordinator.state(taskId).acceptedChild
+    allowFollowup()
     await coordinator.modelControl.continue(parent.id, taskId, readFusionStatus(store, parent.id).task!.modelControl!.revision)
     await parent.whenIdle()
     expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED', acceptedChild: workerId })
@@ -3286,16 +3343,16 @@ describe('enforced model workflow', () => {
     expect(JSON.stringify(toolResults(parent))).toContain('FUSION_LEAD_READ_ONLY')
     for (const request of adapter.requests.filter(request => request.model === 'lead')) {
       const names = request.tools!.map(tool => tool.name)
-      for (const name of ['bash', 'write', 'edit', 'run_code', 'fusion_submit_result']) expect(names).not.toContain(name)
+      for (const name of [shellTool, 'write', 'edit', 'run_code', 'fusion_submit_result']) expect(names).not.toContain(name)
     }
-    expect(adapter.requests.find(request => request.model === 'worker')!.tools!.map(tool => tool.name)).toContain('bash')
+    expect(adapter.requests.find(request => request.model === 'worker')!.tools!.map(tool => tool.name)).toContain(shellTool)
     expect(readFileSync(join(workspace, 'calc.py'), 'utf8')).toContain('return a + b')
     expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
   })
 
   it('rejects a forged PTC call and an unclassified agent-local effect', async () => {
     const { parent, ctx, workspace, adapter } = await setup([
-      toolCallResponse('ptc', 'run_code', { code: 'await tools.bash({command:"touch ptc-bypass"})' }),
+      toolCallResponse('ptc', 'run_code', { code: shellCommand('await tools.bash({command:"touch ptc-bypass"})', "await tools.pwsh({command:\"[IO.File]::WriteAllText((Join-Path $PWD 'ptc-bypass'),'')\"})") }),
       toolCallResponse('unknown', 'local_effect', {}), textResponse('Cannot execute.'), textResponse('Still cannot execute.'),
     ], undefined, { ...options, toolMode: 'both' })
     let effects = 0
@@ -3309,7 +3366,7 @@ describe('enforced model workflow', () => {
     expect(adapter.requests[0]!.tools!.map(tool => tool.name)).not.toContain('local_effect')
     const ordinary = (await ctx.agents.create({ sessionId: SessionId('ordinary-enforcement'), meta: { cwd: workspace },
       agentOptions: { provider: 'test-native', model: 'ordinary' } })).agent
-    expect((await ordinary.ctx.systemPrompt.assemble()).tools.map(tool => tool.name)).toContain('bash')
+    expect((await ordinary.ctx.systemPrompt.assemble()).tools.map(tool => tool.name)).toContain(shellTool)
   })
 
   it('cannot acquire a writer by calling takeover before any Worker report', async () => {
@@ -3406,7 +3463,7 @@ describe('enforced-v3 role separation', () => {
     expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
     const lead = adapter.requests.filter(request => request.model === 'lead')
     for (const request of lead.slice(0, 1)) {
-      expect(catalog(request)).toEqual(expect.arrayContaining(['read', 'bash', 'fusion_delegate']))
+      expect(catalog(request)).toEqual(expect.arrayContaining(['read', shellTool, 'fusion_delegate']))
       expect(catalog(request)).not.toEqual(expect.arrayContaining(['write']))
       for (const denied of ['write', 'edit', 'fusion_takeover', 'fusion_submit_result']) expect(catalog(request)).not.toContain(denied)
     }
@@ -3423,8 +3480,8 @@ describe('enforced-v3 role separation', () => {
     const forged = [
       toolCallResponse('forge-write', 'write', { file_path: 'x.txt', content: 'x' }),
       toolCallResponse('forge-takeover', 'fusion_takeover', { reason: 'fix it myself' }),
-      toolCallResponse('escalate', 'bash', { command: 'ls', description: 'list', sandbox_permissions: 'workspace-write', justification: 'need it' }),
-      toolCallResponse('inspect', 'bash', { command: 'ls calc.py', description: 'list' }),
+      toolCallResponse('escalate', shellTool, { command: 'ls', description: 'list', sandbox_permissions: 'workspace-write', justification: 'need it' }),
+      toolCallResponse('inspect', shellTool, { command: 'ls calc.py', description: 'list' }),
     ]
     const { parent, workspace } = await setup([...forged, textResponse('I can only inspect; changes go to the Sidekick.')], undefined, options)
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Look at the project.' }] }))
@@ -3439,7 +3496,7 @@ describe('enforced-v3 role separation', () => {
   })
 
   it('refuses the Lead shell when the Host provides no sandbox policy', async () => {
-    const { parent } = await setup([toolCallResponse('inspect', 'bash', { command: 'ls', description: 'list' }), textResponse('No shell.')], undefined, { ...options, sandbox: false })
+    const { parent } = await setup([toolCallResponse('inspect', shellTool, { command: 'ls', description: 'list' }), textResponse('No shell.')], undefined, { ...options, sandbox: false })
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'List files.' }] }))
     await parent.whenIdle()
     expect(JSON.stringify(toolResults(parent))).toContain('exposes no sandbox policy')
@@ -3465,7 +3522,7 @@ describe('enforced-v3 delegation after Lead inspection', () => {
   const options = { modelLike: true, enforcedWorkflow: 'enforced-v3', files: true, sandbox: true } as const
   it('delegates after a foreground read-only Lead command', async () => {
     const { parent, coordinator, taskId } = await setup([
-      toolCallResponse('inspect', 'bash', { command: 'ls', description: 'list' }), delegateV3(), acceptV3(), textResponse('Done.'),
+      toolCallResponse('inspect', shellTool, { command: 'ls', description: 'list' }), delegateV3(), acceptV3(), textResponse('Done.'),
     ], [edit(), report()], options)
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Correct addition.' }] }))
     await parent.whenIdle()
@@ -3474,7 +3531,7 @@ describe('enforced-v3 delegation after Lead inspection', () => {
 
   it('refuses a background Lead command so it cannot block the handoff (study failure A)', async () => {
     const { parent, coordinator, taskId } = await setup([
-      toolCallResponse('inspect-bg', 'bash', { command: 'sleep 1; ls', description: 'list', run_in_background: true }), delegateV3(), acceptV3(), textResponse('Done.'),
+      toolCallResponse('inspect-bg', shellTool, { command: 'sleep 1; ls', description: 'list', run_in_background: true }), delegateV3(), acceptV3(), textResponse('Done.'),
     ], [edit(), report()], { ...options, jobs: true })
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Correct addition.' }] }))
     await parent.whenIdle()
@@ -3552,12 +3609,11 @@ describe('enforced-v3 delegation in the same step as Lead inspection', () => {
   })
 
   it('does not refuse a delegation issued alongside a read-only Lead command', async () => {
-    const step = parallelCalls(toolCallResponse('inspect', 'bash', { command: 'sleep 1; ls', description: 'list' }), delegateV3())
+    const step = parallelCalls(toolCallResponse('inspect', shellTool, { command: 'sleep 1; ls', description: 'list' }), delegateV3())
     const { parent, coordinator, taskId } = await setup([step, acceptV3(), textResponse('Done.')], [edit(), report()], options)
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Correct addition.' }] }))
     await parent.whenIdle()
     const results = toolResults(parent).map(result => JSON.stringify(result.message.content))
-    console.log('PAR', JSON.stringify(results.map(r => r.slice(0, 200))))
     expect(coordinator.state(taskId), results.join('\n')).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
   })
 })
@@ -3569,8 +3625,9 @@ describe('enforced-v3 daily-driver safeguards (study 2026-09-26)', () => {
   const withChecks = (checks: unknown[], requirements = ['addition']) => toolCallResponse('delegate', 'fusion_delegate', {
     requirements, goal: 'Correct addition', brief: 'Fix calc.py add. Submit a report after implementing.',
     constraints: [], allowedPaths: ['calc.py'], checks })
-  const unit = { id: 'addition', command: 'python3 -B -m unittest -v test_calc', kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }
-  const suite = { id: 'suite', command: 'sh suite.sh', parser: 'pytest', baseline: 'no-new-failures' }
+  const unit = { id: 'addition', command: py('python3 -B -m unittest -v test_calc'), kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }
+  const suiteScript = process.platform === 'win32' ? 'suite.ps1' : 'suite.sh'
+  const suite = { id: 'suite', command: shellCommand('sh suite.sh', 'pwsh -NoProfile -File suite.ps1'), parser: 'pytest', baseline: 'no-new-failures' }
 
   it('keeps one Lead tool catalog through handoff, review and rework so the prompt cache survives (round 4)', async () => {
     const { parent, coordinator, taskId, adapter } = await setup([delegateV3(), review('rework'),
@@ -3584,11 +3641,11 @@ describe('enforced-v3 daily-driver safeguards (study 2026-09-26)', () => {
   })
 
   it('makes the Lead name an existing test the Worker rewrote before accepting (canvasapi)', async () => {
-    const checks = [{ id: 'addition', command: 'python3 -B -m unittest -v test_calc', kind: 'test', parser: 'unittest' }]
+    const checks = [{ id: 'addition', command: py('python3 -B -m unittest -v test_calc'), kind: 'test', parser: 'unittest' }]
     const handoff = toolCallResponse('delegate', 'fusion_delegate', { requirements: ['addition'], goal: 'Correct addition', brief: 'Fix add.',
       constraints: [], allowedPaths: ['calc.py', 'test_calc.py'], checks })
-    const rewrite = toolCallResponse('rewrite', 'bash', { description: 'Fix add and weaken its test', command:
-      "printf 'def add(a, b):\\n    return a + b\\n' > calc.py && sed -i.bak 's/add(2, 3), 5/add(2, 3), add(2, 3)/' test_calc.py && rm test_calc.py.bak" })
+    const rewrite = toolCallResponse('rewrite', shellTool, { description: 'Fix add and weaken its test', command:
+      shellCommand("printf 'def add(a, b):\\n    return a + b\\n' > calc.py && sed -i.bak 's/add(2, 3), 5/add(2, 3), add(2, 3)/' test_calc.py && rm test_calc.py.bak", "[IO.File]::WriteAllText((Join-Path $PWD 'calc.py'), \"def add(a, b):`n    return a + b`n\"); (Get-Content (Join-Path $PWD 'test_calc.py') -Raw).Replace('add(2, 3), 5','add(2, 3), add(2, 3)') | Set-Content (Join-Path $PWD 'test_calc.py') -NoNewline") })
     const named = toolCallResponse('accept-named', 'fusion_review_result', { decision: 'accept',
       reason: 'test_calc.py assertion changed; confirmed it still asserts add(2, 3) is computed by add, calc.py fixed and unittest passes.',
       requirements: [{ index: 1, met: true, evidence: 'calc.py add returns a + b; test_calc passed natively' }] })
@@ -3601,11 +3658,11 @@ describe('enforced-v3 daily-driver safeguards (study 2026-09-26)', () => {
   })
 
   it('does not flag tests that were only extended', async () => {
-    const checks = [{ id: 'addition', command: 'python3 -B -m unittest -v test_calc', kind: 'test', parser: 'unittest' }]
+    const checks = [{ id: 'addition', command: py('python3 -B -m unittest -v test_calc'), kind: 'test', parser: 'unittest' }]
     const handoff = toolCallResponse('delegate', 'fusion_delegate', { requirements: ['addition'], goal: 'Correct addition', brief: 'Fix add.',
       constraints: [], allowedPaths: ['calc.py', 'test_calc.py'], checks })
-    const extend = toolCallResponse('extend', 'bash', { description: 'Fix add and add a test', command:
-      "printf 'def add(a, b):\\n    return a + b\\n' > calc.py && printf '    def test_zero(self):\\n        self.assertEqual(add(0, 0), 0)\\n' >> test_calc.py" })
+    const extend = toolCallResponse('extend', shellTool, { description: 'Fix add and add a test', command:
+      shellCommand("printf 'def add(a, b):\\n    return a + b\\n' > calc.py && printf '    def test_zero(self):\\n        self.assertEqual(add(0, 0), 0)\\n' >> test_calc.py", "[IO.File]::WriteAllText((Join-Path $PWD 'calc.py'), \"def add(a, b):`n    return a + b`n\"); [IO.File]::AppendAllText((Join-Path $PWD 'test_calc.py'), \"    def test_zero(self):`n        self.assertEqual(add(0, 0), 0)`n\")") })
     const { parent, coordinator, taskId } = await setup([handoff, acceptV3(), textResponse('Done.')], [extend, report()], options)
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Correct addition.' }] }))
     await parent.whenIdle()
@@ -3644,8 +3701,8 @@ describe('enforced-v3 daily-driver safeguards (study 2026-09-26)', () => {
 
   it('passes a regression suite whose only failures already failed on the untouched workspace', async () => {
     const { parent, coordinator, taskId, adapter, workspace } = await setup([withChecks([unit, suite]), acceptV3(), textResponse('Done.')], [edit(), report()], options)
-    writeFileSync(join(workspace, 'suite.sh'), "if grep -q 'a + b' calc.py; then printf 'FAILED tests/test_legacy.py::test_old - AssertionError\\n1 failed, 5 passed in 0.10s\\n'; "
-      + "else printf 'FAILED tests/test_legacy.py::test_old - AssertionError\\nFAILED tests/test_calc.py::test_add - AssertionError\\n2 failed, 4 passed in 0.10s\\n'; fi; exit 1\n")
+    writeFileSync(join(workspace, suiteScript), shellCommand("if grep -q 'a + b' calc.py; then printf 'FAILED tests/test_legacy.py::test_old - AssertionError\\n1 failed, 5 passed in 0.10s\\n'; else printf 'FAILED tests/test_legacy.py::test_old - AssertionError\\nFAILED tests/test_calc.py::test_add - AssertionError\\n2 failed, 4 passed in 0.10s\\n'; fi; exit 1\n",
+      "if (Select-String -Path calc.py -SimpleMatch -Quiet 'a + b') { Write-Output \"FAILED tests/test_legacy.py::test_old - AssertionError`n1 failed, 5 passed in 0.10s\" } else { Write-Output \"FAILED tests/test_legacy.py::test_old - AssertionError`nFAILED tests/test_calc.py::test_add - AssertionError`n2 failed, 4 passed in 0.10s\" }; exit 1"))
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Correct addition.' }] }))
     await parent.whenIdle()
     expect(coordinator.state(taskId), results(parent)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
@@ -3655,8 +3712,8 @@ describe('enforced-v3 daily-driver safeguards (study 2026-09-26)', () => {
 
   it('refuses acceptance when the regression suite shows a failure the baseline did not have', async () => {
     const { parent, coordinator, taskId, workspace } = await setup([withChecks([unit, suite]), acceptV3(), textResponse('Stopped.')], [edit(), report(), report('report-2')], options)
-    writeFileSync(join(workspace, 'suite.sh'), "if grep -q 'a + b' calc.py; then printf 'FAILED tests/test_legacy.py::test_old - x\\nFAILED tests/test_other.py::test_new - x\\n2 failed, 4 passed in 0.10s\\n'; "
-      + "else printf 'FAILED tests/test_legacy.py::test_old - x\\n1 failed, 5 passed in 0.10s\\n'; fi; exit 1\n")
+    writeFileSync(join(workspace, suiteScript), shellCommand("if grep -q 'a + b' calc.py; then printf 'FAILED tests/test_legacy.py::test_old - x\\nFAILED tests/test_other.py::test_new - x\\n2 failed, 4 passed in 0.10s\\n'; else printf 'FAILED tests/test_legacy.py::test_old - x\\n1 failed, 5 passed in 0.10s\\n'; fi; exit 1\n",
+      "if (Select-String -Path calc.py -SimpleMatch -Quiet 'a + b') { Write-Output \"FAILED tests/test_legacy.py::test_old - x`nFAILED tests/test_other.py::test_new - x`n2 failed, 4 passed in 0.10s\" } else { Write-Output \"FAILED tests/test_legacy.py::test_old - x`n1 failed, 5 passed in 0.10s\" }; exit 1"))
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Correct addition.' }] }))
     await parent.whenIdle()
     expect(results(parent)).toContain('Acceptance checks do not prove completion')
@@ -3665,7 +3722,7 @@ describe('enforced-v3 daily-driver safeguards (study 2026-09-26)', () => {
 
   it('refuses a baseline it cannot read instead of guessing', async () => {
     const { parent, workspace } = await setup([withChecks([unit, suite]), textResponse('Stopped.')], [edit(), report()], options)
-    writeFileSync(join(workspace, 'suite.sh'), "printf 'something went wrong\\n'; exit 2\n")
+    writeFileSync(join(workspace, suiteScript), shellCommand("printf 'something went wrong\\n'; exit 2\n", "Write-Output 'something went wrong'; exit 2"))
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Correct addition.' }] }))
     await parent.whenIdle()
     expect(results(parent)).toContain('could not be read')

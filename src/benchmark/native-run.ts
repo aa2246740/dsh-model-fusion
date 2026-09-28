@@ -13,6 +13,7 @@ import { NativeRequestBudget } from '../host/native-budget.js'
 import { nativeRequestAgent } from '../host/native-request.js'
 import { observeNativeUsage } from '../host/native-usage.js'
 import type { NativeUsageRecord } from '../host/native-usage.js'
+import { nativeShellTool } from '../host/shell.js'
 import { snapshotWorkspace } from '../host/workspace.js'
 import type { ResolvedProfile } from '../profile/resolve.js'
 import { profileRoutes } from '../profile/compactor.js'
@@ -56,7 +57,7 @@ export async function runNativeBenchmark(ctx: Context, options: NativeBenchmarkO
     || !Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1) throw new Error('Bounded attempt limits required')
   if (options.dataKind === 'real' && !options.outputLimits) throw new Error('Real attempts require preregistered role output limits')
   const { profile, prompts } = options.profile
-  const benchmarkTools = ['bash', 'read', 'glob', 'grep']
+  const benchmarkTools = [nativeShellTool, 'read', 'glob', 'grep']
   for (const name of benchmarkTools) {
     if (!ctx.tools.get(name)) throw new Error(`Native benchmark requires the ${name} tool before any model request`)
   }
