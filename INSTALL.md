@@ -2,14 +2,14 @@
 
 [中文](INSTALL.zh.md) · Product pages: [README.md](README.md) (中文), [README.en.md](README.en.md)
 
-Requires **DeepSeek Harness 0.1.7-rc.2**. Other versions are not supported.
+Requires **DeepSeek Harness 0.2.0-rc.1**. Other versions are not supported.
 
 ## DSH Studio desktop app (recommended)
 
 Click **Plugins** in the left sidebar → **Add plugin**, and enter in "Package name or address":
 
 ```text
-github:aa2246740/dsh-model-fusion#v0.2.1
+github:aa2246740/dsh-model-fusion#v0.2.2
 ```
 
 The release includes the built `lib/`; no clone or build is needed. Then quit and reopen DSH Studio (plugins take effect at the next start).
@@ -17,10 +17,10 @@ The release includes the built `lib/`; no clone or build is needed. Then quit an
 ## Web CLI
 
 ```sh
-dsh plugin --profile web add github:aa2246740/dsh-model-fusion#v0.2.1
+dsh plugin --profile web add github:aa2246740/dsh-model-fusion#v0.2.2
 ```
 
-If `dsh` is not on PATH: `npx @deepseek-ai/dsh@0.1.7-rc.2 plugin --profile web add github:aa2246740/dsh-model-fusion#v0.2.1`.
+If `dsh` is not on PATH: `npx @deepseek-ai/dsh@0.2.0-rc.1 plugin --profile web add github:aa2246740/dsh-model-fusion#v0.2.2`.
 This writes only the `web` profile. Reopen a running Web Host once and reload the page.
 
 ## After installing
