@@ -98,7 +98,7 @@ Lead 等 Sidekick 干活时，可能要等好几分钟。模型的输入缓存�
 
 ### v0.2.1 的 Windows 验证
 
-在 Windows Server 2022、Node 22.23.3、PowerShell 7.6.6、DSH 0.2.0-rc.2 上，**253 项单元测试和 236 项 Host 测试全部通过**，类型检查通过。修复候选完成了插件安装、冷启动、Fusion 设置页及 settings/cache 两个 API 验证。v0.2.1 的服务端和客户端构建文件与该候选完全一致。v0.2.2 只增加了 Lead 在返工时扩大可改文件范围的功能（与平台无关），在 macOS 上复测，未在 Windows 上重跑。
+在 Windows Server 2022、Node 22.23.3、PowerShell 7.6.6、DSH 0.1.7-rc.2 上，**253 项单元测试和 236 项 Host 测试全部通过**，类型检查通过。修复候选完成了插件安装、冷启动、Fusion 设置页及 settings/cache 两个 API 验证。v0.2.1 的服务端和客户端构建文件与该候选完全一致。v0.2.2 只增加了 Lead 在返工时扩大可改文件范围的功能（与平台无关），在 macOS 上复测，未在 Windows 上重跑。
 
 真实 PowerShell ACL 测试中，Lead 执行 `Set-Content probe.txt test` 被拒绝，文件未生成；Sidekick 在获准的工作区内执行同一命令可以写入。这是上面所述的部分 ACL 隔离。验证没有输入模型密钥或发起真实模型请求。macOS 回归通过 253 项单元测试和 235 项 Host 测试，按设计跳过 Windows 专用 ACL 测试。
 

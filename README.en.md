@@ -100,7 +100,7 @@ While the Lead waits for the Sidekick, often for several minutes, the model's pr
 
 ### Windows validation in v0.2.1
 
-On Windows Server 2022 with Node 22.23.3, PowerShell 7.6.6 and DSH 0.2.0-rc.2, all **253 unit tests and 236 Host tests** passed, as did type checking. The repair candidate passed plugin installation, a cold start, the Fusion settings page and both settings/cache APIs. The v0.2.1 server and client bundles are byte-for-byte identical to that candidate. v0.2.2 only adds a way for the Lead to widen the allowed files during rework (platform-independent); it was re-tested on macOS, not on Windows.
+On Windows Server 2022 with Node 22.23.3, PowerShell 7.6.6 and DSH 0.1.7-rc.2, all **253 unit tests and 236 Host tests** passed, as did type checking. The repair candidate passed plugin installation, a cold start, the Fusion settings page and both settings/cache APIs. The v0.2.1 server and client bundles are byte-for-byte identical to that candidate. v0.2.2 only adds a way for the Lead to widen the allowed files during rework (platform-independent); it was re-tested on macOS, not on Windows.
 
 The real PowerShell ACL test denied the Lead's `Set-Content probe.txt test` command and left no file; the Sidekick could write the same file within its granted workspace. This is partial ACL enforcement, with the limits above. These checks used no model credentials or real model requests. macOS regression: 253 unit tests and 235 Host tests passed; the Windows-only ACL test was skipped.
 

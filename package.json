@@ -1,6 +1,6 @@
 {
   "name": "dsh-model-fusion",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "description": "Fusion for DeepSeek Harness: one model entry backed by a frontier Lead that reads, briefs and reviews, and a much cheaper Sidekick that writes the code.",
   "license": "Apache-2.0",

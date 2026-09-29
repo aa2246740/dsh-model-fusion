@@ -2,14 +2,14 @@
 
 [English](INSTALL.md) · 产品介绍：[README.md](README.md)（中文）、[README.en.md](README.en.md)
 
-需要 **DeepSeek Harness 0.1.7-rc.2**，其他版本不支持。
+需要 **DeepSeek Harness 0.2.0-rc.2**，其他版本不支持。
 
 ## DSH Studio 桌面版（推荐）
 
 点左侧栏的 **插件** → **添加插件**，在"包名或地址"里填：
 
 ```text
-github:aa2246740/dsh-model-fusion#v0.2.2
+github:aa2246740/dsh-model-fusion#v0.2.4
 ```
 
 发布版本已包含构建好的 `lib/`，不需要克隆或编译。装好后退出并重新打开 DSH Studio（插件在下次启动时生效）。
@@ -17,10 +17,10 @@ github:aa2246740/dsh-model-fusion#v0.2.2
 ## Web 命令行
 
 ```sh
-dsh plugin --profile web add github:aa2246740/dsh-model-fusion#v0.2.2
+dsh plugin --profile web add github:aa2246740/dsh-model-fusion#v0.2.4
 ```
 
-`dsh` 不在 PATH 里时：`npx @deepseek-ai/dsh@0.1.7-rc.2 plugin --profile web add github:aa2246740/dsh-model-fusion#v0.2.2`。
+`dsh` 不在 PATH 里时：`npx @deepseek-ai/dsh@0.2.0-rc.2 plugin --profile web add github:aa2246740/dsh-model-fusion#v0.2.4`。
 这只会写入 `web` 配置。正在运行的 Web 服务需要重新打开一次，再刷新页面。
 
 ## 装好之后

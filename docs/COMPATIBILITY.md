@@ -1,6 +1,6 @@
 # DSH compatibility
 
-Fusion supports exactly **DeepSeek Harness 0.1.7-rc.2**. It is an ordinary external plugin: it uses only DSH's public
+Fusion supports **DeepSeek Harness 0.2.0-rc.2**. It is an ordinary external plugin: it uses only DSH's public
 plugin APIs and never patches, replaces or rebuilds DSH itself. `scripts/build.mjs` refuses to build against another
 Host version, and the `peerDependencies` pin the same release.
 
