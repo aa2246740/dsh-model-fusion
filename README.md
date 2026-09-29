@@ -84,7 +84,7 @@ Lead 等 Sidekick 干活时，可能要等好几分钟。模型的输入缓存�
 
 ## 支持范围
 
-- **DSH 版本：** 只支持 **0.1.7-rc.2**，桌面版和 Web 版都可以。其他版本不保证可用；新版本发布后会另行适配。
+- **DSH 版本：** 只支持 **0.2.0-rc.2**，桌面版和 Web 版都可以。其他版本不保证可用；新版本发布后会另行适配。
 - **模型：** DSH 官方自带的模型线路，以及 [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login)、dsh-antigravity-oauth 提供的订阅登录线路。其他第三方模型插件未经测试。
 - **系统：**
   - **macOS：** 已验证（Seatbelt 沙盒）。
@@ -98,7 +98,7 @@ Lead 等 Sidekick 干活时，可能要等好几分钟。模型的输入缓存�
 
 ### v0.2.1 的 Windows 验证
 
-在 Windows Server 2022、Node 22.23.3、PowerShell 7.6.6、DSH 0.1.7-rc.2 上，**253 项单元测试和 236 项 Host 测试全部通过**，类型检查通过。修复候选完成了插件安装、冷启动、Fusion 设置页及 settings/cache 两个 API 验证。v0.2.1 的服务端和客户端构建文件与该候选完全一致。v0.2.2 只增加了 Lead 在返工时扩大可改文件范围的功能（与平台无关），在 macOS 上复测，未在 Windows 上重跑。
+在 Windows Server 2022、Node 22.23.3、PowerShell 7.6.6、DSH 0.2.0-rc.2 上，**253 项单元测试和 236 项 Host 测试全部通过**，类型检查通过。修复候选完成了插件安装、冷启动、Fusion 设置页及 settings/cache 两个 API 验证。v0.2.1 的服务端和客户端构建文件与该候选完全一致。v0.2.2 只增加了 Lead 在返工时扩大可改文件范围的功能（与平台无关），在 macOS 上复测，未在 Windows 上重跑。
 
 真实 PowerShell ACL 测试中，Lead 执行 `Set-Content probe.txt test` 被拒绝，文件未生成；Sidekick 在获准的工作区内执行同一命令可以写入。这是上面所述的部分 ACL 隔离。验证没有输入模型密钥或发起真实模型请求。macOS 回归通过 253 项单元测试和 235 项 Host 测试，按设计跳过 Windows 专用 ACL 测试。
 
@@ -119,9 +119,9 @@ Lead 等 Sidekick 干活时，可能要等好几分钟。模型的输入缓存�
 
 ```sh
 corepack pnpm@9.15.9 install --frozen-lockfile
-node scripts/link-host.mjs /path/to/deepseek-harness-0.1.7-rc.2   # 开发时链接 DSH 源码
-DSHX_HARNESS=/path/to/deepseek-harness-0.1.7-rc.2 pnpm build
-pnpm test && DSHX_HARNESS=/path/to/deepseek-harness-0.1.7-rc.2 pnpm test:host
+node scripts/link-host.mjs /path/to/deepseek-harness-0.2.0-rc.2   # 开发时链接 DSH 源码
+DSHX_HARNESS=/path/to/deepseek-harness-0.2.0-rc.2 pnpm build
+pnpm test && DSHX_HARNESS=/path/to/deepseek-harness-0.2.0-rc.2 pnpm test:host
 ```
 
 Windows 开发环境需将 PowerShell 7（`pwsh`）、Node 和 Python 加入运行测试的进程 PATH。原生测试通过 `DSHX_HARNESS` 读取已构建的指定 Host；不需要修改 Host 源码。

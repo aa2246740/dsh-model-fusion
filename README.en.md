@@ -86,7 +86,7 @@ While the Lead waits for the Sidekick, often for several minutes, the model's pr
 
 ## Support
 
-- **DSH version:** **0.1.7-rc.2** only, desktop app or Web. Other versions are not guaranteed; new releases will be adapted separately.
+- **DSH version:** **0.2.0-rc.2** only, desktop app or Web. Other versions are not guaranteed; new releases will be adapted separately.
 - **Models:** DSH's built-in providers, plus the subscription routes of [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login) and dsh-antigravity-oauth. Other third-party model plugins are untested.
 - **Operating systems:**
   - **macOS:** verified (Seatbelt sandbox).
@@ -100,7 +100,7 @@ While the Lead waits for the Sidekick, often for several minutes, the model's pr
 
 ### Windows validation in v0.2.1
 
-On Windows Server 2022 with Node 22.23.3, PowerShell 7.6.6 and DSH 0.1.7-rc.2, all **253 unit tests and 236 Host tests** passed, as did type checking. The repair candidate passed plugin installation, a cold start, the Fusion settings page and both settings/cache APIs. The v0.2.1 server and client bundles are byte-for-byte identical to that candidate. v0.2.2 only adds a way for the Lead to widen the allowed files during rework (platform-independent); it was re-tested on macOS, not on Windows.
+On Windows Server 2022 with Node 22.23.3, PowerShell 7.6.6 and DSH 0.2.0-rc.2, all **253 unit tests and 236 Host tests** passed, as did type checking. The repair candidate passed plugin installation, a cold start, the Fusion settings page and both settings/cache APIs. The v0.2.1 server and client bundles are byte-for-byte identical to that candidate. v0.2.2 only adds a way for the Lead to widen the allowed files during rework (platform-independent); it was re-tested on macOS, not on Windows.
 
 The real PowerShell ACL test denied the Lead's `Set-Content probe.txt test` command and left no file; the Sidekick could write the same file within its granted workspace. This is partial ACL enforcement, with the limits above. These checks used no model credentials or real model requests. macOS regression: 253 unit tests and 235 Host tests passed; the Windows-only ACL test was skipped.
 
@@ -121,9 +121,9 @@ The real PowerShell ACL test denied the Lead's `Set-Content probe.txt test` comm
 
 ```sh
 corepack pnpm@9.15.9 install --frozen-lockfile
-node scripts/link-host.mjs /path/to/deepseek-harness-0.1.7-rc.2   # link DSH sources for development
-DSHX_HARNESS=/path/to/deepseek-harness-0.1.7-rc.2 pnpm build
-pnpm test && DSHX_HARNESS=/path/to/deepseek-harness-0.1.7-rc.2 pnpm test:host
+node scripts/link-host.mjs /path/to/deepseek-harness-0.2.0-rc.2   # link DSH sources for development
+DSHX_HARNESS=/path/to/deepseek-harness-0.2.0-rc.2 pnpm build
+pnpm test && DSHX_HARNESS=/path/to/deepseek-harness-0.2.0-rc.2 pnpm test:host
 ```
 
 For Windows development, put PowerShell 7 (`pwsh`), Node and Python on the test process PATH. Native tests use `DSHX_HARNESS` to read the built, pinned Host checkout; no Host source changes are required.
