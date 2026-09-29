@@ -51,6 +51,15 @@ function happyPath() {
 }
 
 describe('task reducer', () => {
+  it('widens the current work order scope only by adding paths', () => {
+    const reported = reduceAll(happyPath().slice(0, 7))
+    const widened = reduce(reported, envelope('work-order/scope-expanded', 8,
+      { workOrderId: order().id, allowedPaths: [...order().allowedPaths, 'tests/extra.py'], added: ['tests/extra.py'], reason: 'test outside scope' }))
+    expect(widened.currentWorkOrder?.allowedPaths).toEqual([...order().allowedPaths, 'tests/extra.py'])
+    expect(() => reduce(reported, envelope('work-order/scope-expanded', 8,
+      { workOrderId: order().id, allowedPaths: ['tests/extra.py'], added: ['tests/extra.py'], reason: 'drops the original scope' }))).toThrowError(FusionError)
+  })
+
   it('replays the same events to the same state', () => {
     expect(reduceAll(happyPath())).toEqual(reduceAll(happyPath()))
     expect(reduceAll(happyPath()).phase).toBe('COMPLETED')

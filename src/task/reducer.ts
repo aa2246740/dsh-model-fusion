@@ -126,6 +126,15 @@ function applyPayload(state: TaskState | undefined, event: FusionEvent): TaskSta
       }
       return resetReviewForNewSubject({ ...next, currentWorkOrder: { ...order, acceptance: event.payload.acceptance } })
     }
+    case 'work-order/scope-expanded': {
+      // Only the Lead widens its own frozen scope, and only by adding paths.
+      const next = need(state, event), order = next.currentWorkOrder
+      if (!order || order.mode === 'explore' || order.mode === 'text' || order.id !== event.payload.workOrderId || next.lease
+        || order.allowedPaths.some(path => !event.payload.allowedPaths.includes(path))) {
+        throw new FusionError(WORK_ORDER_CONFLICT, 'Scope expansion requires the current quiescent implementation work order and keeps every allowed path')
+      }
+      return resetReviewForNewSubject({ ...next, currentWorkOrder: { ...order, allowedPaths: event.payload.allowedPaths } })
+    }
     case 'child/accepted':
       return {
         ...need(state, event),

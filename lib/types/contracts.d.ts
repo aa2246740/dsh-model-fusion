@@ -371,6 +371,11 @@ export type FusionEvent = EventEnvelope<'task/created', {
     workOrderId: WorkOrderId;
     acceptance: readonly AcceptanceCriterion[];
     reason: string;
+}> | EventEnvelope<'work-order/scope-expanded', {
+    workOrderId: WorkOrderId;
+    allowedPaths: readonly string[];
+    added: readonly string[];
+    reason: string;
 }> | EventEnvelope<'child/accepted', {
     operationId: OperationId;
     child: SessionId;

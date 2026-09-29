@@ -107,7 +107,17 @@ def reset_test_files(repo, patch):
         elif os.path.exists(os.path.join(repo, f)): os.remove(os.path.join(repo, f))
 
 
+def hidden_test_paths(iid):
+    """Files the hidden test patch touches, and which of them it creates. An agent must never see these before grading."""
+    patch = rows()[iid]['test_patch']
+    touched = sorted(set(re.findall(r'^diff --git a/(\S+)', patch, re.M)))
+    created = sorted(set(re.findall(r'^diff --git a/(\S+) b/\S+\nnew file mode', patch, re.M)))
+    return touched, created
+
+
 def grade(repo, iid):
+    # Applies the hidden tests IN PLACE: never start another attempt in a graded workspace (prepare() a fresh one).
+
     r = rows()[iid]
     reset_test_files(repo, r['test_patch'])
     apply(repo, r['test_patch'])

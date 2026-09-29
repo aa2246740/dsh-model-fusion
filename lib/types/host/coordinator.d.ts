@@ -134,7 +134,7 @@ export declare class FusionCoordinator {
     clear(agent: Agent): Promise<void>;
     wait(agent: Agent, exec: ToolRunContext): Promise<string>;
     delegate(agent: Agent, args: DelegateInput, exec: ToolRunContext, mode?: 'explore' | 'implement' | 'text'): Promise<string>;
-    rework(agent: Agent, feedback: string, exec: ToolRunContext, block?: boolean, checks?: readonly CheckDefinition[]): Promise<string>;
+    rework(agent: Agent, feedback: string, exec: ToolRunContext, block?: boolean, checks?: readonly CheckDefinition[], addAllowedPaths?: readonly string[]): Promise<string>;
     review(agent: Agent, decision: 'accept' | 'rework' | 'needs-decision', reason: string, exec: ToolRunContext, verdicts?: readonly {
         index: number;
         met: boolean;

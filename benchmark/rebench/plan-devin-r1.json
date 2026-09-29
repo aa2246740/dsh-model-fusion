@@ -1,0 +1,45 @@
+{
+  "_note": "Devin-vs-DSH pilot round 1: 9 SWE-rebench tasks, 1 repetition each. Devin conditions run on Devin Desktop via Computer Use; DSH conditions run via run.py against the local DSH Studio Host. Freeze before any model call.",
+  "createdAt": "2026-09-29",
+  "reps": 1,
+  "exclude": {
+    "pypa__twine-1309": "Environment drift: gold patch fails its own PASS_TO_PASS under current deps (ANSI color codes absent from twine output). harness.py validate -> valid=false. Excluded as invalid per ACCEPTANCE; not a model result."
+  },
+  "conditions": {
+    "D_F": {
+      "harness": "devin",
+      "devinModel": "fusion-gpt-6-astra-high-sidekick-swe-2-medium",
+      "description": "Devin Desktop Fusion: GPT-6 Astra High lead + SWE-2 Medium sidekick (driven by Computer Use)"
+    },
+    "D_X": {
+      "harness": "devin",
+      "devinModel": "gpt-6-astra-high",
+      "description": "Devin Desktop single model: GPT-6 Astra High"
+    },
+    "S_F": {
+      "provider": "dsh-model-fusion",
+      "model": "auto",
+      "pair": {
+        "lead": { "provider": "pi-openai-codex", "model": "gpt-6-astra", "reasoningEffort": "high" },
+        "worker": { "provider": "devin-local", "model": "devin/swe-2", "reasoningEffort": "medium" }
+      },
+      "description": "DSH Fusion 0.2.0: same pair (Astra high lead + SWE-2 medium worker)"
+    },
+    "S_X": {
+      "provider": "pi-openai-codex",
+      "model": "gpt-6-astra",
+      "effort": "high",
+      "reuse": { "results": "results-r4/results.jsonl", "condition": "X_astra_only", "rep": 1 },
+      "description": "DSH Astra high alone: reuse round-4 rep-1 rows (no new calls)"
+    }
+  },
+  "prices": {
+    "gpt-6-astra": [10, 1, 50],
+    "gpt-6-astra-high": [10, 1, 50],
+    "claude-fable-5-1-medium": [10, 0.25, 50],
+    "devin/swe-2": [0, 0, 0],
+    "swe-2-medium": [0, 0, 0],
+    "glm-5.3-flash": [0.15, 0.03, 0.5],
+    "compactor": [0, 0, 0]
+  }
+}

@@ -1046,7 +1046,7 @@ export class FusionCoordinator {
       throw new Error('Settle the current writer and effects before a new work order: wait for or stop your running commands (job_output, job_kill) and let pending tools finish, then delegate again')
     }
     const promoting = mode === 'implement' && priorState.currentWorkOrder?.mode === 'explore'
-    if (priorState.currentWorkOrder && !promoting) throw new Error('A Worker already owns this task; use fusion_rework with model-authored feedback')
+    if (priorState.currentWorkOrder && !promoting) throw new Error('A Worker already owns this task; use fusion_rework with model-authored feedback (after a report it can also add allowedPaths with addAllowedPaths, or correct checks)')
     const base: WorkspaceSnapshot = mode === 'text'
       ? { schemaVersion: 1, root: `text:${binding.sessionId}`, entries: [], excludedDirectoryNames: [], id: SnapshotId(`text:${binding.taskId}`) }
       : snapshotWorkspace(agent.session.header.cwd!)
@@ -1200,6 +1200,42 @@ export class FusionCoordinator {
   }
 
   /**
+   * The Lead owns scope as it owns acceptance. When a report shows the frozen
+   * allowedPaths were too narrow (seen in a benchmark: a test file outside the
+   * scope still encoded the old behaviour, and the task could only end
+   * unfinished), the Lead may add paths between reports. Paths are only added.
+   * The added files still hold their delegation-time bytes, which become part
+   * of the change base so diffs and the rewritten-test gate cover them.
+   */
+  #expandScope(binding: SessionBinding, runtime: RuntimeRecord, feedback: string, paths: readonly string[], exec: ToolRunContext): string {
+    const state = this.state(binding.taskId), order = state.currentWorkOrder!
+    if (order.mode === 'explore' || order.mode === 'text') throw new Error('This assignment has no workspace scope to expand')
+    if (!runtime.submitted || state.lease || this.#held.get(binding.taskId) || this.effects.pending(binding.taskId).length) {
+      throw new Error('Add allowedPaths only after the current Worker report, while the Worker is quiescent')
+    }
+    for (const path of paths) workspacePath(runtime.root, path.trim())
+    // Already allowed (for example a retry after a later step of the same rework failed): nothing to record.
+    const added = [...new Set(paths.map(path => path.trim()).filter(Boolean))].filter(path => !order.allowedPaths.includes(path))
+    if (!added.length) return feedback
+    const allowedPaths = [...order.allowedPaths, ...added]
+    let changeBase = runtime.changeBase
+    if (changeBase) {
+      const known = changeBase.contents
+      const fresh = { ...runtime.base, entries: runtime.base.entries.filter(entry => !Object.hasOwn(known, entry.path)) }
+      let extra: ChangeBase
+      try { extra = captureChangeBase(this.store, binding.taskId, fresh, added) } catch (error) {
+        throw new Error(`Files under the added paths already differ from the delegation base, so their original bytes cannot be recorded: ${(error as Error).message}. Inspect those changes before widening the scope.`)
+      }
+      changeBase = { ...changeBase, contents: { ...known, ...extra.contents } }
+    }
+    this.store.writeDocument(`scope-expansion:${binding.taskId}:${randomUUID()}`, 0, { schemaVersion: 1, taskId: binding.taskId,
+      workOrderId: order.id, causeId: exec.callId, reason: feedback, before: order.allowedPaths, added, at: new Date().toISOString() })
+    this.append(binding.taskId, 'work-order/scope-expanded', { workOrderId: order.id, allowedPaths, added, reason: feedback })
+    this.#saveRuntime({ ...this.#runtime(binding.taskId), ...(changeBase ? { changeBase } : {}) })
+    return `${feedback}\n\nThe Lead added these paths to the frozen allowedPaths: ${JSON.stringify(added)}. You may now change: ${JSON.stringify(allowedPaths)}`
+  }
+
+  /**
    * The freeze stops a Worker from weakening acceptance; it does not bind the
    * Lead, who owns acceptance. A Lead may correct a broken check (for example
    * an interpreter this host lacks) between reports, but every previously
@@ -1236,7 +1272,7 @@ export class FusionCoordinator {
     return `${feedback}\n\nThe Lead amended the frozen acceptance commands. The Host will verify your next report with:\n${JSON.stringify(definitions)}`
   }
 
-  async rework(agent: Agent, feedback: string, exec: ToolRunContext, block = true, checks?: readonly CheckDefinition[]): Promise<string> {
+  async rework(agent: Agent, feedback: string, exec: ToolRunContext, block = true, checks?: readonly CheckDefinition[], addAllowedPaths?: readonly string[]): Promise<string> {
     const binding = this.#binding(agent, 'lead'), state = this.state(binding.taskId)
     if (!state.acceptedChild || !state.currentWorkOrder) throw new Error('No accepted Worker to continue')
     const childId = state.acceptedChild
@@ -1259,6 +1295,10 @@ export class FusionCoordinator {
     const continuationRounds = runtime.continuationRounds ?? 0
     if (binding.profile.interactionMode !== 'model-like' && feedbackKind === 'rework' && runtime.reworkRounds >= state.currentWorkOrder.policy.maxReworkRounds) throw new Error('Rework limit reached; request a user decision')
     if (binding.profile.interactionMode !== 'model-like' && feedbackKind === 'continuation' && continuationRounds >= state.currentWorkOrder.policy.maxWorkerSteps) throw new Error('Continuation limit reached; request a user decision')
+    if (addAllowedPaths?.length) {
+      feedback = this.#expandScope(binding, runtime, feedback, addAllowedPaths, exec)
+      runtime = this.#runtime(binding.taskId)
+    }
     if (checks) {
       feedback = this.#amendAcceptance(binding, runtime, feedback, checks, exec)
       runtime = this.#runtime(binding.taskId)
@@ -1727,17 +1767,18 @@ export class FusionCoordinator {
       parameters: { goal: { type: 'string', description: 'The complete implementation outcome, including all planned stages.', required: true },
         brief: { type: 'string', description: 'The current stage plan. Put temporary deferrals and sequencing here; later feedback may advance this stage.', required: true },
         constraints: { ...optionalStringList, description: 'Default none. Only durable requirements that remain true across every planned implementation stage. Do not freeze a temporary deferral such as not implementing stage two yet.' },
-        allowedPaths: { ...stringList, description: 'Workspace-relative allowed changes for all planned stages, including regression tests. Later feedback cannot expand this set.' },
+        allowedPaths: { ...stringList, description: 'Workspace-relative allowed changes for all planned stages, including regression tests. The Worker cannot expand this set; after a report you can add paths with fusion_rework addAllowedPaths.' },
         block: { type: 'boolean', description: 'Default true. False permits read-only Lead work while the Worker retains write ownership.' },
         checks: { type: 'array', required: true, items: checkItem, description: 'Acceptance commands the Host runs after the Worker reports; [] for review-only work.' },
         requirements: { ...optionalStringList, description: 'The user\'s hard requirements as exact quotes of their messages (required behaviour, names, strings, formats, acceptance criteria), 1-20 items. The Host verifies each quote against the user\'s words, freezes them for the Sidekick, and your accept must give one verdict per item.' } }, output: textOutput,
       execute: (args, exec) => this.delegate(agent, { ...args, constraints: args.constraints ?? [], checks: normalizeChecks(args.checks), requirements: args.requirements ?? [] }, exec) })))
-    dispose.push(scope.tools.register(defineTool({ name: 'fusion_rework', description: 'Send specific Lead-authored feedback to the same persistent Worker, including advancing a planned implementation stage. Before a report this continues unfinished work within the Worker-step budget; after a report it consumes a rework round. Active generation and native job waits can be replaced without restarting a tracked job; an active foreground tool finishes before the new brief. Keep durable requirements and allowed paths unchanged. Do not suggest new files outside the frozen allowed paths.',
+    dispose.push(scope.tools.register(defineTool({ name: 'fusion_rework', description: 'Send specific Lead-authored feedback to the same persistent Worker, including advancing a planned implementation stage. Before a report this continues unfinished work within the Worker-step budget; after a report it consumes a rework round. Active generation and native job waits can be replaced without restarting a tracked job; an active foreground tool finishes before the new brief. Keep durable requirements unchanged. Do not suggest files outside the frozen allowed paths unless you add them with addAllowedPaths.',
       // Orchestration includes human approval waits; leaf tools retain their
       // resource deadlines, but the wait itself must not expire.
       parameters: { feedback: { type: 'string', required: true }, block: { type: 'boolean', description: 'Default true. False returns after delivery; call fusion_wait for the report and checks.' },
+        addAllowedPaths: { ...optionalStringList, description: 'After a Worker report, when the task needs changes outside the frozen allowedPaths (for example an existing test elsewhere that encodes the old behaviour): workspace-relative paths to add. Paths are only added; the change is recorded and consumes this rework round.' },
         checks: { type: 'array', items: checkItem, description: 'Omit to keep the frozen acceptance checks. Only when a frozen check itself is wrong (for example its interpreter does not exist on this host), pass the complete corrected set after the Worker report. Every existing definitionPath must stay protected; the amendment is recorded and consumes this rework round.' } }, output: textOutput,
-      execute: (args, exec) => this.rework(agent, args.feedback, exec, args.block ?? true, args.checks && normalizeChecks(args.checks)) })))
+      execute: (args, exec) => this.rework(agent, args.feedback, exec, args.block ?? true, args.checks && normalizeChecks(args.checks), args.addAllowedPaths) })))
     dispose.push(scope.tools.register(defineTool({ name: 'fusion_wait', description: 'Wait for the background Worker to become quiescent. Exploration returns source findings for planning; implementation runs its frozen native checks. Call sequentially after a handoff or feedback.',
       parameters: {}, output: textOutput, execute: (_args, exec) => this.wait(agent, exec) })))
     dispose.push(scope.tools.register(defineTool({ name: 'fusion_review_result', description: 'Record a completed Lead review bound to the candidate this native request received. Accept requires passing evidence.',

@@ -30,7 +30,7 @@ import { MockAdapter, textResponse, toolCallResponse, maxTokensResponse } from '
 import { TestSessionQuery } from '@fusion-host-test/session-query'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import * as ToolFs from '@deepseek-ai/dsh-tool-fs'
-import { mountNativeShell, shellTool, shellCommand, py } from './shell-fixture.js'
+import { mountNativeShell, shellTool, shellCommand, py, python } from './shell-fixture.js'
 import CodeRuntime from '@deepseek-ai/dsh-ptc-runtime-node'
 import { JobId } from '@deepseek-ai/dsh-jobs'
 import { FusionCoordinator } from '../src/host/coordinator.js'
@@ -2787,6 +2787,61 @@ describe('Lead acceptance amendment', () => {
     await parent.whenIdle()
     expect(JSON.stringify(toolResults(parent))).toContain('must keep every protected definition path')
     expect(store.events(taskId).filter(event => event.type === 'work-order/acceptance-amended')).toHaveLength(0)
+  })
+})
+
+describe('Lead scope expansion', () => {
+  const narrow = toolCallResponse('delegate-narrow', 'fusion_delegate', {
+    goal: 'Correct addition', brief: 'Fix calc.py add. Submit a report after implementing.',
+    constraints: [], allowedPaths: ['calc.py'],
+    checks: [{ id: 'addition', description: 'Addition tests pass', command: py('python3 -B -m unittest -v test_calc'), kind: 'test', parser: 'unittest' }],
+  })
+  const needsDecision = toolCallResponse('review-scope', 'fusion_review_result', { decision: 'needs-decision',
+    reason: 'calc.py is correct, but test_calc.py lacks a zero case and lies outside the frozen allowedPaths.' })
+  const widen = (paths: string[], id = 'widen') => toolCallResponse(id, 'fusion_rework', {
+    feedback: 'Add a zero-sum regression test to test_calc.py; keep the implementation.', addAllowedPaths: paths })
+  const appendTest = toolCallResponse('append-test', shellTool, { command: shellCommand(
+    "printf '    def test_zero(self):\\n        self.assertEqual(add(0, 0), 0)\\n' >> test_calc.py",
+    "[IO.File]::AppendAllText((Join-Path $PWD 'test_calc.py'), \"    def test_zero(self):`n        self.assertEqual(add(0, 0), 0)`n\")"), description: 'Add a zero-sum test' })
+  const acceptNamed = toolCallResponse('review-accept-named', 'fusion_review_result', { decision: 'accept',
+    reason: 'calc.py adds both inputs; test_calc.py keeps its original test_add expectation and only gains test_zero; the native unittest check passed.' })
+
+  it('lets the Lead add a path after a report and verifies the widened change', async () => {
+    const { parent, coordinator, store, taskId, adapter } = await setup([
+      narrow, needsDecision, widen(['test_calc.py']), acceptNamed, textResponse('Added the zero case.'),
+    ], [edit(), report(), appendTest, report('re-report')])
+    parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Correct addition and cover zero.' }] }))
+    await parent.whenIdle()
+    expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+    expect(coordinator.state(taskId).currentWorkOrder?.allowedPaths).toEqual(['calc.py', 'test_calc.py'])
+    expect(store.events(taskId).filter(event => event.type === 'work-order/scope-expanded')).toHaveLength(1)
+    const [auditId] = store.listDocumentIds(`scope-expansion:${taskId}:`)
+    expect(store.readDocument(auditId!)?.value).toMatchObject({ before: ['calc.py'], added: ['test_calc.py'] })
+    expect(JSON.stringify(adapter.requests.filter(request => request.model === 'worker').at(-1))).toContain('added these paths to the frozen allowedPaths')
+    expect(store.listDocumentIds('child:')).toHaveLength(1)
+  })
+
+  it('keeps the rewritten-test gate on files added to the scope', async () => {
+    // Rewrites an original assertion line (still passing): the gate must see the delegation-time bytes.
+    const rewriteTest = toolCallResponse('rewrite-test', shellTool, { command: `${python} -c "import pathlib; p = pathlib.Path('test_calc.py'); p.write_text(p.read_text().replace('add(2, 3)', 'add(3, 2)'))"`,
+      description: 'Rewrite the existing assertion' })
+    const { parent, coordinator, taskId } = await setup([
+      narrow, needsDecision, widen(['test_calc.py']), review('accept'), textResponse('Refused until named.'),
+    ], [edit(), report(), rewriteTest, report('re-report')])
+    parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Correct addition and cover zero.' }] }))
+    await parent.whenIdle()
+    expect(JSON.stringify(toolResults(parent))).toContain('Existing tests lost or changed original lines')
+    expect(coordinator.state(taskId).phase).toBe('REVIEWING')
+  })
+
+  it('refuses a path that escapes the workspace', async () => {
+    const { parent, store, taskId } = await setup([
+      narrow, needsDecision, widen(['../outside.py'], 'widen-escape'), textResponse('Refused.'),
+    ], [edit(), report()])
+    parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Correct addition and cover zero.' }] }))
+    await parent.whenIdle()
+    expect(store.events(taskId).filter(event => event.type === 'work-order/scope-expanded')).toHaveLength(0)
+    expect(store.listDocumentIds(`scope-expansion:${taskId}:`)).toHaveLength(0)
   })
 })
 

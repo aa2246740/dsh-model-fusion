@@ -25,6 +25,23 @@ Nine real open-source issues (SWE-rebench, Python), two runs each, graded by hid
 - Limits: small sample (9 tasks × 2), Python only, and public issues may be in training data.
 - Method, raw data and per-round conclusions: [docs/EVIDENCE.md](docs/EVIDENCE.md).
 
+**Against Devin's own Fusion:** both used the same pair, GPT-6 Astra (high) as Lead and SWE-2 as Sidekick, on the same
+tasks, workspaces and hidden tests.
+
+After contaminated attempts were excluded, four tasks were clean in every condition:
+
+| | Solved | Cost |
+|---|---|---|
+| **This plugin: Astra + SWE-2** | **4/4** | **$2.73** |
+| Devin Fusion: Astra + SWE-2 | 3/4 | $4.81 |
+| Devin, Astra alone | 3/4 | $8.13 |
+
+- Four tasks with one run each cannot rank the two systems. This is not a parity claim.
+- SWE-2 is priced at $0 on both sides, so the costs are the Lead's.
+- The plugin took about 3.4× Devin's wall time.
+- For the excluded attempts and why they were excluded, see
+  [docs/EVIDENCE.md](docs/EVIDENCE.md#against-devins-own-fusion-round-devin-r1-2026-09-29).
+
 ## Use
 
 1. Install the plugin ([INSTALL.md](INSTALL.md)).
@@ -43,6 +60,7 @@ Nine real open-source issues (SWE-rebench, Python), two runs each, graded by hid
   - Tests that were already failing (for example, missing optional dependencies) can be marked "no new failures".
   - If the Sidekick rewrote an existing test, it is flagged, and the Lead must confirm it before accepting.
 - **Rework:** a rejected change goes back to the same Sidekick with the concrete problem.
+  - When the allowed files turn out too narrow (for example another test file still encodes the old behaviour), the Lead can add them during rework. Paths are only added, never removed, and each change is recorded.
 - **The Lead does not write code.** The program enforces this, not the prompt:
   - the Lead has no file-writing tools;
   - its shell commands run in DSH's read-only sandbox.
@@ -82,7 +100,7 @@ While the Lead waits for the Sidekick, often for several minutes, the model's pr
 
 ### Windows validation in v0.2.1
 
-On Windows Server 2022 with Node 22.23.3, PowerShell 7.6.6 and DSH 0.1.7-rc.2, all **253 unit tests and 236 Host tests** passed, as did type checking. The repair candidate passed plugin installation, a cold start, the Fusion settings page and both settings/cache APIs. The v0.2.1 server and client bundles are byte-for-byte identical to that candidate.
+On Windows Server 2022 with Node 22.23.3, PowerShell 7.6.6 and DSH 0.1.7-rc.2, all **253 unit tests and 236 Host tests** passed, as did type checking. The repair candidate passed plugin installation, a cold start, the Fusion settings page and both settings/cache APIs. The v0.2.1 server and client bundles are byte-for-byte identical to that candidate. v0.2.2 only adds a way for the Lead to widen the allowed files during rework (platform-independent); it was re-tested on macOS, not on Windows.
 
 The real PowerShell ACL test denied the Lead's `Set-Content probe.txt test` command and left no file; the Sidekick could write the same file within its granted workspace. This is partial ACL enforcement, with the limits above. These checks used no model credentials or real model requests. macOS regression: 253 unit tests and 235 Host tests passed; the Windows-only ACL test was skipped.
 

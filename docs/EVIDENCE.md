@@ -36,6 +36,35 @@ Per task (Fusion from round 5, Astra alone from round 4; ✓ = resolved, two att
 | python-scim__scim2-models-139_interface | ✓ ✓ $5.47 | ✓ ✓ $2.51 | ✗ ✓ $5.02 |
 | pallets-eco__wtforms-892_interface | ✗ ✗ $2.34 | ✗ ✗ $1.12 | ✗ ✗ $2.30 |
 
+## Against Devin's own Fusion (round devin-r1, 2026-09-29)
+
+This round compared the plugin (0.2.0) with Fusion inside Devin, using the same pair: GPT-6 Astra (high) as Lead and
+SWE-2 (medium) as Sidekick. Both got the same prompt, the same fresh checkouts and the same hidden-test grading. Each
+single model ran alone as a baseline.
+
+Seven attempts were excluded as contaminated:
+- Six Devin reruns started in workspaces that still held the hidden tests from grading an earlier, quota-blocked
+  attempt.
+- One DSH Sidekick downloaded the upstream fix. It still failed.
+
+The four tasks that were clean in every condition give this result:
+
+| Condition | Resolved | Cost | Mean minutes |
+| --- | --- | --- | --- |
+| **DSH Fusion: Astra + SWE-2** | **4/4** | **$2.73** | 20.1 |
+| Devin Fusion: Astra + SWE-2 | 3/4 | $4.81 | 6.0 |
+| Devin, Astra alone | 3/4 | $8.13 | 5.1 |
+| DSH, Astra alone (round 4) | 3/4 | $10.11 | 5.8 |
+
+- Fusion was cheaper than the single model on both harnesses: 41% less on Devin and 73% less on DSH.
+- The one task only DSH Fusion solved was sqlfluff-7615.
+- Four tasks with one attempt each cannot rank the two systems. It is no claim of parity or superiority.
+- SWE-2 is free in Devin's catalog and is priced at $0 on both sides, so these costs are the Lead's.
+- The plugin's Sidekick used about 4× Devin's Sidekick calls, and the plugin took about 3.4× Devin's wall time.
+- Freshly processed prompt input was 5% of all prompt tokens for the plugin and 19% for Devin Fusion.
+- Protocol, deviations and root causes: [REBENCH_DEVIN.md](REBENCH_DEVIN.md) and
+  `benchmark/rebench/results-devin-r1/`.
+
 ## Setup
 
 **Tasks.** Nine instances from `nebius/SWE-rebench-leaderboard` (split 2026_03): real GitHub issues with the

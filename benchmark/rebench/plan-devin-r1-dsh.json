@@ -1,0 +1,24 @@
+{
+  "_note": "DSH side of devin-r1: run via run.py against the local DSH Studio Host. Only new calls here is S_F (Fusion Astra-high + SWE-2-medium). S_X is reused from r4 (no calls). Same tasks/prompt/grading as the Devin conditions.",
+  "createdAt": "2026-09-29",
+  "reps": 1,
+  "exclude": {
+    "pypa__twine-1309": "Environment drift: gold patch fails PASS_TO_PASS under current deps (ANSI codes absent). Excluded as invalid."
+  },
+  "conditions": {
+    "S_F": {
+      "provider": "dsh-model-fusion",
+      "model": "auto",
+      "pair": {
+        "lead": { "provider": "pi-openai-codex", "model": "gpt-6-astra", "reasoningEffort": "high" },
+        "worker": { "provider": "devin-local", "model": "devin/swe-2", "reasoningEffort": "medium" }
+      }
+    }
+  },
+  "prices": {
+    "gpt-6-astra": [10, 1, 50],
+    "devin/swe-2": [0, 0, 0],
+    "swe-2-medium": [0, 0, 0],
+    "glm-5.3-flash": [0.15, 0.03, 0.5]
+  }
+}

@@ -70,24 +70,80 @@ def parent_of(path):
     except ValueError: return None
 
 
-def usage(session_id):
-    """Per role and model: calls and tokens from the native session logs (Lead plus this run's Workers)."""
+def session_logs(session_id):
+    """The Lead log and this run's Worker logs, or None when the Lead log is missing."""
     # DSH 0.1.5 writes session.v3, 0.1.7 session.v4 (same event types).
     found = glob.glob(os.path.join(DSH_HOME, 'sessions', '*', session_id, 'session.v[34].jsonl.zstd'))
-    if not found: return {'error': 'session log not found'}
+    if not found: return None
     lead = found[0]
     # Only this run's Sidekicks: repeated rounds reuse the workspace path, so the same session folder can hold
     # Sidekicks of earlier runs (round 5 first summed round 4's Workers).
     workers = [path for path in glob.glob(os.path.join(os.path.dirname(os.path.dirname(lead)), 'fusion-worker-*', 'session.v[34].jsonl.zstd'))
                if parent_of(path) == session_id]
+    return lead, workers
+
+
+# A command that downloads something. Paired with the upstream repo or package name it may fetch the fix.
+FETCH = re.compile(r'\b(curl|wget|git\s+clone|git\s+fetch|pip3?\s+download)\b|urllib\.request|requests\.get|httpx\.get', re.I)
+
+
+def audit_session(session_id, repo_slug):
+    """Contamination audit of a DSH attempt, Lead and Workers: did a tool fetch the upstream fix?
+
+    Flags a downloading command or web tool whose arguments name the upstream repository
+    (github.com/<slug>, a GitHub API query on it) or download the project's package (a newer
+    release can contain the fix). URLs inside edits or comments are text, not fetches.
+    devin-r1: an S_F Worker fetched the upstream PR diff for pycqa__isort-2491.
+    """
+    logs = session_logs(session_id)
+    if not logs: return {'error': 'session log not found'}
+    lead, workers = logs
+    slug = repo_slug.lower(); package = slug.split('/')[-1]
+    hits = []
+    for path in [lead] + workers:
+        role = 'lead' if path == lead else 'worker'
+        for e in events(path):
+            if e.get('type') != 'tool/call': continue
+            d = e.get('data', {})
+            if isinstance(d, str):
+                try: d = json.loads(d)
+                except ValueError: continue
+            if not isinstance(d, dict): continue
+            name = str(d.get('name') or '').lower()
+            args = d.get('arguments')
+            text = (args if isinstance(args, str) else json.dumps(args, ensure_ascii=False)).lower()
+            if name in ('edit', 'write') or not (FETCH.search(text) or 'web' in name or 'fetch' in name): continue
+            if f'github.com/{slug}' in text or f'repo:{slug}' in text or re.search(r'pip3?\s+download\s+' + re.escape(package), text):
+                hits.append(f'{role}:{name}')
+    return {'session_id': session_id, 'repo': repo_slug, 'flagged': hits, 'contaminated': bool(hits)}
+
+
+def usage(session_id):
+    """Per role and model: calls and tokens from the native session logs (Lead plus this run's Workers)."""
+    logs = session_logs(session_id)
+    if not logs: return {'error': 'session log not found'}
+    lead, workers = logs
     by, tools, delegations, refused, turn_end, problems = {}, {}, 0, 0, [], []
+    # Efficiency counters mirroring the Devin-side reader: per-turn tool-call
+    # counts (turn+step group a single assistant response's calls) and whether a
+    # shell/exec call batched several commands into one.
+    turn_calls, multi_cmd = {}, 0
     for path in [lead] + workers:
         role = 'lead' if path == lead else 'worker'
         names = {}
         for e in events(path):
             t, d = e.get('type'), e.get('data', {})
+            if not isinstance(d, dict):
+                if isinstance(d, str):
+                    try: d = json.loads(d)
+                    except ValueError: d = {}
+                else: d = {}
             if t == 'assistant/message':
-                src = (d.get('message') or {}).get('source') or {}
+                amsg = d.get('message')
+                if isinstance(amsg, str):
+                    try: amsg = json.loads(amsg)
+                    except ValueError: amsg = {}
+                src = ((amsg if isinstance(amsg, dict) else {}).get('source')) or {}
                 key = f"{role}:{src.get('model')}"
                 row = by.setdefault(key, {'calls': 0, 'input': 0, 'cacheRead': 0, 'output': 0, 'unreported': 0})
                 u = first_usage(d); row['calls'] += 1
@@ -96,19 +152,45 @@ def usage(session_id):
             elif t == 'tool/call':
                 name = d.get('name'); tools[f'{role}:{name}'] = tools.get(f'{role}:{name}', 0) + 1; names[d.get('callId')] = name
                 if role == 'lead' and name in ('fusion_delegate', 'fusion_delegate_text'): delegations += 1
+                turn_calls.setdefault((role, d.get('turn'), d.get('step')), set()).add(d.get('callId'))
+                args = d.get('arguments')
+                if isinstance(args, str):
+                    try: args = json.loads(args)
+                    except ValueError: args = {}
+                args = args if isinstance(args, dict) else {}
+                cmd = args.get('command') or args.get('cmd') or ''
+                if isinstance(args.get('commands'), list) and len(args['commands']) > 1:
+                    multi_cmd += 1
+                elif isinstance(cmd, str) and any(s in cmd for s in ('&&', '||', ';', '\n')):
+                    multi_cmd += 1
             elif t == 'tool/result':
                 if role == 'lead' and 'FUSION_LEAD_READ_ONLY' in json.dumps(d): refused += 1
                 # Root causes of workflow stalls: refused or undecided Fusion tool results, verbatim (truncated).
-                msg = d.get('message') or {}
+                msg = d.get('message')
+                if isinstance(msg, str):
+                    try: msg = json.loads(msg)
+                    except ValueError: msg = {}
+                msg = msg if isinstance(msg, dict) else {}
                 # DSH 0.1.7: the tool message itself carries toolCallId/isError; 0.1.5 nested tool-result parts.
                 parts = [msg] if msg.get('role') == 'tool' else msg.get('content') or []
                 for part in parts:
+                    if not isinstance(part, dict): continue
                     name = names.get(part.get('toolCallId'), '')
                     text = ''.join(c.get('text', '') for c in part.get('content') or [] if isinstance(c, dict))
                     if name.startswith('fusion_') and (part.get('isError') or 'needs-decision' in text or 'unavailable' in text) and len(problems) < 30:
                         problems.append({'role': role, 'tool': name, 'text': text[:300]})
             elif t == 'turn/end' and role == 'lead': turn_end.append((d.get('reason') or {}).get('kind'))
-    return {'by': by, 'tools': tools, 'delegations': delegations, 'leadRefused': refused, 'leadTurnEnds': turn_end, 'fusionProblems': problems}
+    # Efficiency: counts of tool calls that shared one assistant turn (>1 = parallel).
+    per_turn = [len(v) for v in turn_calls.values()]
+    efficiency = {
+        'totalToolCalls': sum(per_turn),
+        'parallelTurns': sum(1 for n in per_turn if n > 1),
+        'multiCommandCalls': multi_cmd,
+        'meanToolCallsPerTurn': round(sum(per_turn) / len(per_turn), 3) if per_turn else 0,
+        'turns': len(per_turn),
+    }
+    return {'by': by, 'tools': tools, 'delegations': delegations, 'leadRefused': refused,
+            'leadTurnEnds': turn_end, 'fusionProblems': problems, 'efficiency': efficiency}
 
 
 def cost(u, prices):
@@ -117,7 +199,7 @@ def cost(u, prices):
         model = key.split(':', 1)[1]
         if model not in prices: unknown.append(model); continue
         i, c, o = prices[model]
-        total += (row['input'] * i + row['cacheRead'] * c + row['output'] * o) / 1e6
+        total += ((row['input'] + row.get('cacheCreation', 0)) * i + row['cacheRead'] * c + row['output'] * o) / 1e6
     return round(total, 4), unknown
 
 
@@ -175,6 +257,7 @@ def attempt(job, plan, args):
             result['sessionId'] = launch['sessionId']; result['selected'] = launch['selected']
             watch(launch['sessionId'], started + args.timeout_min * 60, result)
             result['usage'] = usage(launch['sessionId'])
+            result['contamination'] = audit_session(launch['sessionId'], r['repo'])
         result['wallSeconds'] = round(time.time() - started)
         result['grade'] = harness.grade(repo, iid)
         if args.cleanup:
@@ -233,6 +316,10 @@ def main():
     plan = json.load(open(args.plan))
     conds = args.conditions.split(',') if args.conditions else list(plan['conditions'])
     ids = args.only.split(',') if args.only else harness.IDS
+    excluded = set((plan.get('exclude') or {}).keys())
+    if excluded:
+        print('excluding invalid instances:', json.dumps({k: plan['exclude'][k] for k in excluded}), flush=True)
+        ids = [i for i in ids if i not in excluded]
     saved_pair = None
     if not args.dry_run and any(plan['conditions'][name].get('pair') for name in conds):
         saved_pair = dsh('settings').get('pair')
