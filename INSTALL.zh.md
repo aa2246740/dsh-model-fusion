@@ -9,7 +9,7 @@
 点左侧栏的 **插件** → **添加插件**，在"包名或地址"里填：
 
 ```text
-github:aa2246740/dsh-model-fusion#v0.2.4
+dsh-model-fusion@0.2.5
 ```
 
 发布版本已包含构建好的 `lib/`，不需要克隆或编译。装好后退出并重新打开 DSH Studio（插件在下次启动时生效）。
@@ -17,10 +17,10 @@ github:aa2246740/dsh-model-fusion#v0.2.4
 ## Web 命令行
 
 ```sh
-dsh plugin --profile web add github:aa2246740/dsh-model-fusion#v0.2.4
+dsh plugin --profile web add dsh-model-fusion@0.2.5
 ```
 
-`dsh` 不在 PATH 里时：`npx @deepseek-ai/dsh@0.2.0-rc.2 plugin --profile web add github:aa2246740/dsh-model-fusion#v0.2.4`。
+`dsh` 不在 PATH 里时：`npx @deepseek-ai/dsh@0.2.0-rc.2 plugin --profile web add dsh-model-fusion@0.2.5`。
 这只会写入 `web` 配置。正在运行的 Web 服务需要重新打开一次，再刷新页面。
 
 ## 装好之后

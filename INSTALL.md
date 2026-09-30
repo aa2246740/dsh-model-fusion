@@ -9,7 +9,7 @@ Requires **DeepSeek Harness 0.2.0-rc.2**. Other versions are not supported.
 Click **Plugins** in the left sidebar → **Add plugin**, and enter in "Package name or address":
 
 ```text
-github:aa2246740/dsh-model-fusion#v0.2.4
+dsh-model-fusion@0.2.5
 ```
 
 The release includes the built `lib/`; no clone or build is needed. Then quit and reopen DSH Studio (plugins take effect at the next start).
@@ -17,10 +17,10 @@ The release includes the built `lib/`; no clone or build is needed. Then quit an
 ## Web CLI
 
 ```sh
-dsh plugin --profile web add github:aa2246740/dsh-model-fusion#v0.2.4
+dsh plugin --profile web add dsh-model-fusion@0.2.5
 ```
 
-If `dsh` is not on PATH: `npx @deepseek-ai/dsh@0.2.0-rc.2 plugin --profile web add github:aa2246740/dsh-model-fusion#v0.2.4`.
+If `dsh` is not on PATH: `npx @deepseek-ai/dsh@0.2.0-rc.2 plugin --profile web add dsh-model-fusion@0.2.5`.
 This writes only the `web` profile. Reopen a running Web Host once and reload the page.
 
 ## After installing
