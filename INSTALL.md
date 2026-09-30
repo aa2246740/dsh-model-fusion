@@ -4,24 +4,32 @@
 
 Requires **DeepSeek Harness 0.2.0-rc.2**. Other versions are not supported.
 
-## DSH Studio desktop app (recommended)
+## Install on DeepSeek Harness web or desktop
 
-Click **Plugins** in the left sidebar → **Add plugin**, and enter in "Package name or address":
+Fill `dsh-model-fusion` in the **Add plugin** wizard's search box, and click **Install**:
 
-```text
-dsh-model-fusion@0.2.5
-```
+![Add plugin wizard](https://raw.githubusercontent.com/aa2246740/dsh-model-fusion/main/docs/add-plugin-wizard.png)
 
-The release includes the built `lib/`; no clone or build is needed. Then quit and reopen DSH Studio (plugins take effect at the next start).
+The release includes the built `lib/`; no clone or build is needed.
 
-## Web CLI
+## Install with `dsh` cli
+
+Install [`dsh-model-fusion`](https://www.npmjs.com/package/dsh-model-fusion) plugin from [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh):
 
 ```sh
-dsh plugin --profile web add dsh-model-fusion@0.2.5
+dsh plugin --profile web add dsh-model-fusion
 ```
 
-If `dsh` is not on PATH: `npx @deepseek-ai/dsh@0.2.0-rc.2 plugin --profile web add dsh-model-fusion@0.2.5`.
-This writes only the `web` profile. Reopen a running Web Host once and reload the page.
+Or update the `dsh-model-fusion` plugin:
+
+```sh
+dsh plugin --profile web update dsh-model-fusion@latest
+```
+
+Then start the web UI with `dsh web`. No build step, no restart.
+
+If `dsh` is not on PATH: `npx @deepseek-ai/dsh@0.2.0-rc.2 plugin --profile web add dsh-model-fusion`.
+This writes only the `web` profile; it cannot modify the desktop app's profile — use the in-app **Add plugin** wizard above for desktop.
 
 ## After installing
 
