@@ -1,5 +1,7 @@
 # Fusion · DSH 插件
 
+[![npm version](https://img.shields.io/npm/v/dsh-model-fusion)](https://www.npmjs.com/package/dsh-model-fusion)
+
 [English](README.en.md) · [安装](INSTALL.zh.md) · [Install (English)](INSTALL.md)
 
 Fusion 在 DeepSeek Harness（DSH）的模型菜单里是一个普通模型：**Fusion · 自动**。背后是两个你自己选的模型：

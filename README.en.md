@@ -1,5 +1,7 @@
 # Fusion · a DSH plugin
 
+[![npm version](https://img.shields.io/npm/v/dsh-model-fusion)](https://www.npmjs.com/package/dsh-model-fusion)
+
 [中文](README.md) · [Install](INSTALL.md) · [安装](INSTALL.zh.md)
 
 In DeepSeek Harness (DSH), Fusion is one entry in the model menu: **Fusion · auto**. Behind it are two models you choose:
