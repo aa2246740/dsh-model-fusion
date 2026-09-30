@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, ModelModality, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-api-session-controller/types'
 import type { PhysicalRoute } from '../contracts.js'
@@ -13,12 +13,20 @@ export const FUSION_MODEL = 'auto'
 export const isFusionSelection = (route: { provider?: string; model?: string } | undefined): boolean =>
   route?.provider === FUSION_PROVIDER && route.model === FUSION_MODEL
 
+/** Resolves the configured Lead's declared input modalities; undefined means unconfigured or unverifiable. */
+export type LeadInputModalities = () => Promise<readonly ModelModality[] | undefined>
+
 /** Catalog-only local adapter; the native request is physically routed before dispatch. */
 export class FusionCatalogAdapter extends LlmAdapter {
+  constructor(private readonly leadInputModalities?: LeadInputModalities) { super() }
   override providerInfo(provider: string) { return { id: provider, name: 'Fusion' } }
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
+    // The Lead is the only role that reads user content, so the entry admits
+    // exactly what the configured Lead admits; text-only until it resolves.
+    const lead = (await this.leadInputModalities?.()) ?? []
     return [{ provider, id: FUSION_MODEL, name: 'Fusion · 自动',
-      description: 'Lead 与 Worker 协作。在设置 → Fusion 中配置模型。', inputModalities: ['text'] }]
+      description: 'Lead 与 Worker 协作。在设置 → Fusion 中配置模型。',
+      inputModalities: [...new Set<ModelModality>(['text', ...lead])] }]
   }
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     if (provider !== FUSION_PROVIDER || model !== FUSION_MODEL) throw new Error('Unknown local Fusion selection')
