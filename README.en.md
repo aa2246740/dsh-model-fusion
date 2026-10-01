@@ -72,7 +72,7 @@ After contaminated attempts were excluded, four tasks were clean in every condit
 
 ## Cache keepalive
 
-While the Lead waits for the Sidekick, often for several minutes, the model's prompt cache can expire. The next request then re-reads the whole conversation at full price. Keepalive sends a 1-token request at intervals so the cache stays warm.
+While the Lead waits for the Sidekick, often for several minutes, the model's prompt cache can expire. The next request then re-reads the whole conversation at full price. Keepalive resends the Lead's previous request at intervals with only “Reply OK” appended. The prefix is identical, so the provider serves it from cache and the cache lifetime is renewed; the model answers OK, and the reply is discarded: it never enters the conversation and no tool call runs.
 
 - **Defaults:** taken from each provider's documentation, covering the vendors of the Artificial Analysis top 20.
   - Matched by model name: gpt-*, claude-*, gemini-*, glm-*, grok-*, kimi-*, deepseek-*, …

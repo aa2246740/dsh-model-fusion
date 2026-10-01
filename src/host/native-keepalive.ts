@@ -12,8 +12,18 @@ import { cacheHit } from './cache-policy.js'
 import { NativeAuxiliaryRequests } from './native-auxiliary.js'
 import { nativeRequestAgent } from './native-request.js'
 
-/** R19 recovered schedule; one-token output is this plugin's conservative cap. */
+/** R19 recovered schedule. */
 export const KEEPALIVE_INTERVAL_MS = 285_000
+/**
+ * The line appended after the copied prefix. maxTokens: 1 is not enough on its own: the ChatGPT Codex route
+ * rejects an output cap and pi-ai omits it, so a ping that said "continue" made the Lead think and call tools
+ * (live log: median 463 output tokens, all ending in tool calls). Measured 2026-10-01 on gpt-6-astra (Codex):
+ * "Reply OK" answered "OK" in 5 output tokens, 0 reasoning, no tool calls, 16/16 with tools still offered,
+ * full cache hit; "continue" called tools 8/8 and a bare "OK" read as approval and produced a plan.
+ * Tool choice and reasoning effort cannot change here: effort is part of OpenAI's cache key (effort "low"
+ * missed the cache entirely) and DSH requests carry no tool_choice.
+ */
+export const KEEPALIVE_PROMPT = 'Reply OK'
 export const KEEPALIVE_ATTEMPTS = 11
 export interface KeepaliveClock {
   now(): number
@@ -35,7 +45,7 @@ interface Callbacks {
   /** Per-model mode and interval (user setting, learned, defaults); absent: the pair profile and a fixed interval. */
   policy?(owner: Owner, provider: string, model: string): { mode: CacheMode; intervalMs: number }
   /** Evidence for learning and the settings page: a request after a wait, or a ping. */
-  observe?(owner: Owner, provider: string, model: string, sample: { gapSeconds: number; ping: boolean; hit: boolean; cacheRead: number; input: number }): void
+  observe?(owner: Owner, provider: string, model: string, sample: { gapSeconds: number; ping: boolean; hit: boolean; cacheRead: number; input: number; output?: number }): void
 }
 export interface KeepaliveRecord {
   schemaVersion: 1
@@ -165,7 +175,7 @@ export class NativeCacheKeepalive {
       row.record.attempts++; row.record.state = 'inflight'
       if (!this.#persist(row)) return
       const request: GenerateOptions = { ...structuredClone(row.input), maxTokens: 1, signal: row.controller.signal,
-        messages: [...structuredClone(row.input.messages), createUserMessage({ content: [{ type: 'text', text: 'continue' }],
+        messages: [...structuredClone(row.input.messages), createUserMessage({ content: [{ type: 'text', text: KEEPALIVE_PROMPT }],
           source: { kind: 'plugin:dsh-model-fusion' } })] }
       this.auxiliary.tag(request, { purpose: 'cache-keepalive', taskId: row.record.taskId, sessionId: row.agent.id,
         profileDigest: row.owner.binding.profile.digest, role: row.owner.role, seriesId: row.record.id, iteration: row.record.attempts })
@@ -197,7 +207,7 @@ export class NativeCacheKeepalive {
       }
       const started = manager.clock.now(), previous = manager.#lastStart.get(agent.id)
       manager.#lastStart.set(agent.id, started)
-      let usage: { inputTokens?: number; cacheReadTokens?: number } | undefined
+      let usage: { inputTokens?: number; cacheReadTokens?: number; outputTokens?: number } | undefined
       for await (const chunk of next()) {
         if (chunk.type === 'usage') usage = chunk.usage
         yield chunk
@@ -206,7 +216,7 @@ export class NativeCacheKeepalive {
       const cacheRead = usage.cacheReadTokens ?? 0, input = usage.inputTokens ?? 0
       try {
         manager.callbacks.observe(owner, request.provider, request.model,
-          { gapSeconds: (started - previous) / 1000, ping, hit: cacheHit(cacheRead, input), cacheRead, input })
+          { gapSeconds: (started - previous) / 1000, ping, hit: cacheHit(cacheRead, input), cacheRead, input, output: usage.outputTokens ?? 0 })
       } catch { /* evidence is advisory; never fail a model request over it */ }
     }))
     // Replacement invalidates the previous loop even if the next input is

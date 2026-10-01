@@ -39,7 +39,7 @@ import { completeProfile } from '../src/profile/resolve.js'
 import { loadPromptBundle } from '../src/prompts.js'
 import { FusionCatalogAdapter, FUSION_PROVIDER, FUSION_MODEL, installNativeFusionSelection } from '../src/host/native-selection.js'
 import { FUSION_TASK_CONTEXT } from '../src/host/native-task-context.js'
-import { KEEPALIVE_ATTEMPTS, KEEPALIVE_INTERVAL_MS } from '../src/host/native-keepalive.js'
+import { KEEPALIVE_ATTEMPTS, KEEPALIVE_INTERVAL_MS, KEEPALIVE_PROMPT } from '../src/host/native-keepalive.js'
 import type { KeepaliveClock, KeepaliveRecord } from '../src/host/native-keepalive.js'
 import type { NativeUsageRecord } from '../src/host/native-usage.js'
 import { NativeRequestBudget, authorizeConfiguredPair } from '../src/host/native-budget.js'
@@ -2480,7 +2480,7 @@ describe('optional native cache keepalive', () => {
     expect(request).toMatchObject({ model: 'lead', maxTokens: 1, sessionId: parent.id })
     expect(request.purpose).toBeUndefined()
     expect(request.messages.slice(0, -1)).toEqual(frozenInput)
-    expect(request.messages.at(-1)).toMatchObject({ role: 'user', content: [{ type: 'text', text: 'continue' }] })
+    expect(request.messages.at(-1)).toMatchObject({ role: 'user', content: [{ type: 'text', text: KEEPALIVE_PROMPT }] })
     expect(request.tools).toEqual(prefix.tools)
     expect(parent.session.snapshotEvents()).toEqual(parentEvents)
     expect(child.session.snapshotEvents()).toEqual(childEvents)

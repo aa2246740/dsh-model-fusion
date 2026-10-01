@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { tr, useLang, type Lang } from './i18n.js'
 
 type Mode = 'auto' | 'on' | 'off'
-interface Totals { waits: number; waitHits: number; pings: number; pingHits: number; pingTokens: number; keptWarmTokens: number; resentTokens: number }
+interface Totals { waits: number; waitHits: number; pings: number; pingHits: number; pingTokens: number; pingOutputTokens?: number; keptWarmTokens: number; resentTokens: number }
 interface CacheModel {
   provider: string; model: string; role?: 'lead' | 'worker'
   mode: Mode; intervalSeconds: number
@@ -75,7 +75,7 @@ function ModelCard({ row, onSaved }: { row: CacheModel; onSaved(): void }) {
     {row.suggestion && <p role="status">{tr(lang, `观察到等待 ${minutes(row.suggestion)} 以上缓存仍然命中，可以把间隔放宽到 ${minutes(row.suggestion)}（不会自动修改）。`,
       `Cache still hit after waits over ${minutes(row.suggestion)}; you can lengthen the interval to ${minutes(row.suggestion)} (not changed automatically).`)}</p>}
     {t ? <p>{tr(lang, '效果', 'Effect')}: {tr(lang, `等待后命中 ${t.waitHits}/${t.waits} 次`, `hit after ${t.waitHits}/${t.waits} waits`)}{t.waits ? ` (${Math.round(100 * t.waitHits / t.waits)}%)` : ''}；
-      {tr(lang, ` 保活 ${t.pings} 次（${t.pingHits} 次命中，读取 ${tokens(t.pingTokens)} token，多为缓存价）；`, ` ${t.pings} pings (${t.pingHits} hit, ${tokens(t.pingTokens)} tokens read, mostly at cache price); `)}
+      {tr(lang, ` 保活 ${t.pings} 次（${t.pingHits} 次命中，读取 ${tokens(t.pingTokens)} token，多为缓存价${t.pingOutputTokens != null ? `，输出 ${tokens(t.pingOutputTokens)} token` : ''}）；`, ` ${t.pings} pings (${t.pingHits} hit, ${tokens(t.pingTokens)} tokens read, mostly at cache price${t.pingOutputTokens != null ? `, ${tokens(t.pingOutputTokens)} output` : ''}); `)}
       {tr(lang, ` 等待后仍从缓存读取 ${tokens(t.keptWarmTokens)} token，按全价重发 ${tokens(t.resentTokens)} token。`, ` after waits ${tokens(t.keptWarmTokens)} tokens served from cache, ${tokens(t.resentTokens)} resent at full price.`)}
       {t.pings >= 5 && t.pingHits / t.pings < 0.5 && <b>{tr(lang, ' 保活大多没命中，建议关闭或缩短间隔。', ' Most pings missed: turn it off or shorten the interval.')}</b>}</p>
       : <p>{tr(lang, '还没有数据：Lead 等待 Sidekick 之后才会产生记录。', 'No data yet: records appear after the Lead waits for the Sidekick.')}</p>}
@@ -99,8 +99,8 @@ export function FusionCache({ refresh }: { refresh: number }) {
   }, [refresh, reload, lang])
   return <section className="fusion-cache" aria-label={tr(lang, '缓存保活', 'Cache keepalive')}>
     <h3>{tr(lang, '缓存保活', 'Cache keepalive')}</h3>
-    <p>{tr(lang, 'Lead 等 Sidekick 干活时可能要等几分钟，模型的输入缓存过期后，下一次请求会按全价重读整段对话。保活在等待期间定时发一个只要 1 个 token 的小请求，让缓存不过期。默认值来自各家官方文档，每个模型都可以单独调整。',
-      'While the Lead waits for the Sidekick, the model\'s prompt cache can expire and the next request re-reads the whole conversation at full price. Keepalive sends a 1-token request at intervals to keep it warm. Defaults come from each provider\'s documentation; every model can be adjusted.')}</p>
+    <p>{tr(lang, 'Lead 等 Sidekick 干活时可能要等几分钟，模型的输入缓存过期后，下一次请求会按全价重读整段对话。保活在等待期间定时把 Lead 上一次的请求原样再发一遍，末尾只加一句“Reply OK”，模型只回一个 OK，缓存就不会过期。默认值来自各家官方文档，每个模型都可以单独调整。',
+      'While the Lead waits for the Sidekick, the model\'s prompt cache can expire and the next request re-reads the whole conversation at full price. Keepalive resends the Lead\'s previous request at intervals with only “Reply OK” appended; the model answers OK and the cache stays warm. Defaults come from each provider\'s documentation; every model can be adjusted.')}</p>
     {checked && <p><small>{tr(lang, `官方默认值核对日期：${checked}。`, `Documented defaults checked on ${checked}.`)}</small></p>}
     {error && <p role="alert">{error}</p>}
     {rows?.map(row => <ModelCard key={`${row.provider}/${row.model}/${row.setting.mode ?? ''}/${row.setting.intervalSeconds ?? ''}`} row={row} onSaved={() => setReload(value => value + 1)} />)}

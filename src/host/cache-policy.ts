@@ -6,7 +6,7 @@ import { cacheDefaults, type CacheDefaults, type CacheMode } from './cache-defau
 export interface ModelCacheSetting { mode?: CacheMode; intervalSeconds?: number }
 
 /** One model request that followed a wait: the evidence the policy learns from and the settings page shows. */
-export interface CacheSample { at: string; gapSeconds: number; ping: boolean; hit: boolean; cacheRead: number; input: number }
+export interface CacheSample { at: string; gapSeconds: number; ping: boolean; hit: boolean; cacheRead: number; input: number; output?: number }
 
 export interface ModelCacheStats {
   schemaVersion: 1
@@ -18,6 +18,8 @@ export interface ModelCacheStats {
     waits: number; waitHits: number
     /** Keepalive pings and the tokens they read (mostly at the cache price). */
     pings: number; pingHits: number; pingTokens: number
+    /** Output tokens of pings; absent on stats recorded before 0.2.3. A route that ignores the output cap shows here. */
+    pingOutputTokens?: number
     /** Prefix tokens served from cache after a wait, and tokens resent uncached after a wait. */
     keptWarmTokens: number; resentTokens: number
   }
@@ -84,6 +86,7 @@ export class CachePolicy {
     const totals = stats.totals
     if (row.ping) {
       totals.pings++; totals.pingTokens += row.cacheRead + row.input
+      totals.pingOutputTokens = (totals.pingOutputTokens ?? 0) + (row.output ?? 0)
       if (row.hit) totals.pingHits++
       const recent = stats.samples.filter(item => item.ping && Math.abs(item.gapSeconds - currentIntervalSeconds) <= currentIntervalSeconds * 0.25).slice(-5)
       if (recent.filter(item => !item.hit).length >= 2 && recent.length >= 3) {

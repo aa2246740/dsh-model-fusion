@@ -40,7 +40,10 @@ describe('per-model cache policy', () => {
     cache.observe('r', 'glm-5.3', { gapSeconds: 700, ping: false, hit: false, cacheRead: 3_000, input: 17_000 }, 285)
     cache.observe('r', 'glm-5.3', { gapSeconds: 290, ping: false, hit: true, cacheRead: 30_000, input: 900 }, 285)
     cache.observe('r', 'glm-5.3', ping(true), 285)
-    expect(cache.stats('r', 'glm-5.3')!.totals).toEqual({ waits: 2, waitHits: 1, pings: 1, pingHits: 1, pingTokens: 40_020, keptWarmTokens: 30_000, resentTokens: 17_000 })
+    expect(cache.stats('r', 'glm-5.3')!.totals).toEqual({ waits: 2, waitHits: 1, pings: 1, pingHits: 1, pingTokens: 40_020, pingOutputTokens: 0, keptWarmTokens: 30_000, resentTokens: 17_000 })
+    // A route that ignores the output cap shows up in the ping output total.
+    cache.observe('r', 'glm-5.3', { ...ping(true), output: 463 }, 285)
+    expect(cache.stats('r', 'glm-5.3')!.totals.pingOutputTokens).toBe(463)
     expect(cacheHit(3_968, 17_156)).toBe(false)
     expect(cacheHit(28_800, 4_192)).toBe(true)
   })
