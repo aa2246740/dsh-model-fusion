@@ -14,7 +14,8 @@ describe('documented cache defaults', () => {
     expect(cacheDefaults('bedrock-eu', 'claude-opus-5-5')).toMatchObject({ keepalive: 'auto', intervalSeconds: 270, family: { id: 'anthropic' } })
     expect(cacheDefaults('ds', 'deepseek-v4-pro')).toMatchObject({ keepalive: 'off', family: { id: 'deepseek' } })
     expect(cacheDefaults('pi-zai-coding-cn', 'glm-5.3')).toMatchObject({ keepalive: 'off', source: 'route', family: { id: 'zhipu' } })
-    expect(cacheDefaults('pi-openai-codex', 'gpt-6-astra')).toMatchObject({ keepalive: 'auto', source: 'route' })
+    expect(cacheDefaults('pi-openai-codex', 'gpt-6-astra')).toMatchObject({ keepalive: 'auto', source: 'route', intervalSeconds: 480 })
+    expect(cacheDefaults('pi-anthropic', 'claude-opus-5-5')).toMatchObject({ source: 'route', intervalSeconds: 270 })
     expect(cacheDefaults('my-gateway', 'house-model')).toEqual({ keepalive: 'auto', intervalSeconds: 285, source: 'generic' })
   })
 })
@@ -50,7 +51,7 @@ describe('per-model cache policy', () => {
 
   it('shortens an interval whose pings keep missing, and never lengthens it by itself', () => {
     const cache = policy()
-    for (const hit of [true, false, false]) cache.observe('r', 'grok-4.6', ping(hit), 285)
+    for (const hit of [true, false, false, false]) cache.observe('r', 'grok-4.6', ping(hit), 285)
     expect(cache.stats('r', 'grok-4.6')!.learnedIntervalSeconds).toBe(214)
     expect(cache.resolve('r', 'grok-4.6', 'lead')).toMatchObject({ intervalSeconds: 214, intervalSource: 'learned' })
     for (let i = 0; i < 5; i++) cache.observe('r', 'grok-4.6', { gapSeconds: 900, ping: false, hit: true, cacheRead: 50_000, input: 500 }, 214)
@@ -58,6 +59,21 @@ describe('per-model cache policy', () => {
     expect(cache.suggestion('r', 'grok-4.6', 214)).toBe(900)
     cache.save('r', 'grok-4.6', { intervalSeconds: 900 })
     expect(cache.resolve('r', 'grok-4.6', 'lead')).toMatchObject({ intervalSeconds: 900, intervalSource: 'user' })
+  })
+
+  it('ignores scattered misses: providers drop single prefixes at random', () => {
+    const cache = policy()
+    for (const hit of [true, false, true, true, false, true, true]) cache.observe('r', 'gpt-6-astra', ping(hit), 285)
+    expect(cache.stats('r', 'gpt-6-astra')!.learnedIntervalSeconds).toBeUndefined()
+    expect(cache.resolve('r', 'gpt-6-astra', 'lead').intervalSeconds).toBe(285)
+  })
+
+  it('drops an interval learned by the earlier, noise-prone rule', () => {
+    const cache = policy()
+    cache.observe('r', 'gpt-6-astra', ping(true), 285)
+    const id = 'cache-stats:r\u0001gpt-6-astra', doc = cache.store.readDocument(id)!
+    cache.store.writeDocument(id, doc.revision, { ...(doc.value as object), learnedIntervalSeconds: 214 })
+    expect(cache.resolve('r', 'gpt-6-astra', 'lead')).toMatchObject({ intervalSeconds: 285, intervalSource: 'family' })
   })
 
   it('lists the configured pair and every model with evidence or a setting for the settings page', () => {

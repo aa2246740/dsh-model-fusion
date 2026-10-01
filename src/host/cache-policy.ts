@@ -25,6 +25,8 @@ export interface ModelCacheStats {
   }
   /** Interval shortened after pings kept missing (never lengthened automatically). */
   learnedIntervalSeconds?: number
+  /** Rule that produced learnedIntervalSeconds; values from older rules are ignored. */
+  learnedRule?: number
   updatedAt: string
 }
 
@@ -38,6 +40,13 @@ export interface EffectiveCachePolicy {
 
 /** A request counts as a wait when this long passed since the previous request of the same agent. */
 export const WAIT_SECONDS = 120
+/**
+ * Rule 2 (0.2.3): shorten only when most recent pings at this interval missed (3 of the last up to 5).
+ * Rule 1 shortened on 2 misses, and providers also drop single prefixes at random: the live log had
+ * 4 partial misses in 123 pings, each keeping only the shared 3,968-token system+tools head, while
+ * a probe of the same route still hit after 10+ idle minutes. That noise cut a 285 s interval to 214 s.
+ */
+export const LEARNING_RULE = 2
 const SAMPLE_LIMIT = 60
 const MIN_INTERVAL = 60, MAX_INTERVAL = 3_540
 
@@ -89,8 +98,8 @@ export class CachePolicy {
       totals.pingOutputTokens = (totals.pingOutputTokens ?? 0) + (row.output ?? 0)
       if (row.hit) totals.pingHits++
       const recent = stats.samples.filter(item => item.ping && Math.abs(item.gapSeconds - currentIntervalSeconds) <= currentIntervalSeconds * 0.25).slice(-5)
-      if (recent.filter(item => !item.hit).length >= 2 && recent.length >= 3) {
-        stats.learnedIntervalSeconds = clampInterval(currentIntervalSeconds * 0.75)
+      if (recent.filter(item => !item.hit).length >= 3) {
+        stats.learnedIntervalSeconds = clampInterval(currentIntervalSeconds * 0.75); stats.learnedRule = LEARNING_RULE
         stats.samples = stats.samples.filter(item => !item.ping) // judge the new interval on fresh pings
       }
     } else {
@@ -108,7 +117,8 @@ export class CachePolicy {
   resolve(provider: string, model: string, role: Role, pairChoice?: boolean | 'auto'): EffectiveCachePolicy {
     const defaults = cacheDefaults(provider, model)
     const user = this.setting(provider, model) ?? {}
-    const learned = this.stats(provider, model)?.learnedIntervalSeconds
+    const stats = this.stats(provider, model)
+    const learned = stats?.learnedRule === LEARNING_RULE ? stats.learnedIntervalSeconds : undefined
     let mode: CacheMode, modeSource: EffectiveCachePolicy['modeSource']
     if (user.mode) { mode = user.mode; modeSource = 'user' }
     else if (typeof pairChoice === 'boolean') { mode = pairChoice ? 'on' : 'off'; modeSource = 'pair' }
@@ -151,7 +161,7 @@ export function cacheView(policy: CachePolicy, pair?: { lead: Route; worker: Rou
       defaults: { mode: effective.defaults.keepalive, intervalSeconds: effective.defaults.intervalSeconds, source: effective.defaults.source,
         ...(family ? { family: { label: family.label, lifetime: family.lifetime, discount: family.discount, docs: family.docs } } : {}),
         ...(route ? { route: { label: route.label, reason: route.reason } } : {}) },
-      totals: stats?.totals ?? null, learnedIntervalSeconds: stats?.learnedIntervalSeconds ?? null,
+      totals: stats?.totals ?? null, learnedIntervalSeconds: stats?.learnedRule === LEARNING_RULE ? stats.learnedIntervalSeconds ?? null : null,
       suggestion: policy.suggestion(provider, model, effective.intervalSeconds) ?? null,
       recent: (stats?.samples ?? []).slice(-8).map(item => ({ gapSeconds: Math.round(item.gapSeconds), ping: item.ping, hit: item.hit })) }
   })

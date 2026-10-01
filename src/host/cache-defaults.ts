@@ -26,7 +26,7 @@ export interface CacheFamily {
 
 export const CACHE_FAMILIES: readonly CacheFamily[] = [
   { id: 'openai', label: 'OpenAI', match: /^(gpt-|o\d|codex|chatgpt)/i, discount: '1/10', keepalive: 'auto', intervalSeconds: 285,
-    lifetime: { zh: '空闲 5–10 分钟，最长 1 小时；部分新模型至少 30 分钟（订阅通道实测更短）', en: '5–10 min idle, up to 1 h; some newer models ≥ 30 min (shorter observed via subscriptions)' },
+    lifetime: { zh: '空闲 5–10 分钟，最长 1 小时；部分新模型至少 30 分钟（ChatGPT 订阅通道实测：空闲 10 分钟仍命中，15 分钟已过期）', en: '5–10 min idle, up to 1 h; some newer models ≥ 30 min (ChatGPT subscription measured: still cached after 10 idle min, gone at 15)' },
     docs: 'https://developers.openai.com/api/docs/guides/prompt-caching' },
   { id: 'anthropic', label: 'Anthropic', match: /^claude/i, discount: '1/10', keepalive: 'auto', intervalSeconds: 270,
     lifetime: { zh: '5 分钟，每次命中重新计时（可选 1 小时）', en: '5 min, refreshed on each hit (1 h option)' },
@@ -64,7 +64,9 @@ export const CACHE_FAMILIES: readonly CacheFamily[] = [
 ]
 
 /** Routes of this project's OAuth plugins (dsh-oauth-login, dsh-antigravity-oauth): billing we know. */
-export interface RouteBilling { match: RegExp; label: string; keepalive: CacheMode; reason: { zh: string; en: string } }
+export interface RouteBilling { match: RegExp; label: string; keepalive: CacheMode; reason: { zh: string; en: string }
+  /** Interval measured on this route; overrides the model family default. */
+  intervalSeconds?: number }
 export const OWN_ROUTES: readonly RouteBilling[] = [
   { match: /^pi-zai-coding/, label: 'GLM Coding Plan', keepalive: 'off',
     reason: { zh: '按请求次数计额度，保活会占用次数', en: 'quota counts requests; keepalive pings would use it' } },
@@ -74,7 +76,11 @@ export const OWN_ROUTES: readonly RouteBilling[] = [
     reason: { zh: '每次请求都算一次高级请求', en: 'every request counts as a premium request' } },
   { match: /^agy-/, label: 'Antigravity', keepalive: 'off',
     reason: { zh: '按请求次数限额', en: 'request-count limits' } },
-  ...([[/^pi-openai-codex/, 'ChatGPT (Codex)'], [/^pi-anthropic/, 'Claude'], [/^pi-xai/, 'xAI'], [/^pi-openrouter/, 'OpenRouter']] as const)
+  // Probed 2026-10-01 on gpt-6-astra: a 20.7k-token prefix still hit after 4, 7 and 10 idle minutes and was gone
+  // at 15 and 22. 480 s is 0.8 x the shortest confirmed lifetime; it halves the pings of the 285 s family default.
+  { match: /^pi-openai-codex/, label: 'ChatGPT (Codex)', keepalive: 'auto', intervalSeconds: 480,
+    reason: { zh: '按用量计，缓存命中能省额度；实测缓存空闲 10 分钟仍在', en: 'usage-based; cache hits save quota; measured cache still warm after 10 idle min' } },
+  ...([[/^pi-anthropic/, 'Claude'], [/^pi-xai/, 'xAI'], [/^pi-openrouter/, 'OpenRouter']] as const)
     .map(([match, label]): RouteBilling => ({ match, label, keepalive: 'auto',
       reason: { zh: '按用量计，缓存命中能省额度', en: 'usage-based; cache hits save quota' } })),
 ]
@@ -91,7 +97,7 @@ export interface CacheDefaults {
 export function cacheDefaults(provider: string, model: string): CacheDefaults {
   const family = CACHE_FAMILIES.find(item => item.match.test(model))
   const route = OWN_ROUTES.find(item => item.match.test(provider))
-  if (route) return { keepalive: route.keepalive, intervalSeconds: family?.intervalSeconds ?? GENERIC_INTERVAL_SECONDS, source: 'route', family, route }
+  if (route) return { keepalive: route.keepalive, intervalSeconds: route.intervalSeconds ?? family?.intervalSeconds ?? GENERIC_INTERVAL_SECONDS, source: 'route', family, route }
   if (family) return { keepalive: family.keepalive, intervalSeconds: family.intervalSeconds, source: 'family', family }
   return { keepalive: 'auto', intervalSeconds: GENERIC_INTERVAL_SECONDS, source: 'generic' }
 }
