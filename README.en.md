@@ -82,7 +82,8 @@ While the Lead waits for the Sidekick, often for several minutes, the model's pr
   - whether the cache survived each wait;
   - how many pings were sent and how many tokens they read;
   - how many tokens were kept from being resent at full price.
-- **Automatic adjustment:** if pings keep missing, the interval is shortened automatically. It is never lengthened automatically; when a longer interval looks safe, the page suggests it and you decide.
+- **Measured (ChatGPT subscription route, gpt-6-astra, ~20k-token context):** each ping gets a 5-token reply, with no reasoning and no tool call. The cache was still there after 10 idle minutes and gone after 15, and every ping restarts that clock, so this route defaults to a ping every 8 minutes.
+- **Automatic adjustment:** the interval is shortened only when 3 of the last 5 pings at that interval missed (an occasional random eviction does not count). It is never lengthened automatically; when a longer interval looks safe, the page suggests it and you decide.
 
 ## Support
 
@@ -100,7 +101,7 @@ While the Lead waits for the Sidekick, often for several minutes, the model's pr
 
 ### Windows validation in v0.2.1
 
-On Windows Server 2022 with Node 22.23.3, PowerShell 7.6.6 and DSH 0.1.7-rc.2, all **253 unit tests and 236 Host tests** passed, as did type checking. The repair candidate passed plugin installation, a cold start, the Fusion settings page and both settings/cache APIs. The v0.2.1 server and client bundles are byte-for-byte identical to that candidate. v0.2.2 only adds a way for the Lead to widen the allowed files during rework (platform-independent); it was re-tested on macOS, not on Windows.
+On Windows Server 2022 with Node 22.23.3, PowerShell 7.6.6 and DSH 0.1.7-rc.2, all **253 unit tests and 236 Host tests** passed, as did type checking. The repair candidate passed plugin installation, a cold start, the Fusion settings page and both settings/cache APIs. The v0.2.1 server and client bundles are byte-for-byte identical to that candidate. Later releases (v0.2.2: the Lead can widen the allowed files during rework; v0.2.3–v0.2.5: DSH 0.2.0-rc.2 support; v0.2.6: cheaper cache keepalive) are platform-independent and were re-tested on macOS, not on Windows.
 
 The real PowerShell ACL test denied the Lead's `Set-Content probe.txt test` command and left no file; the Sidekick could write the same file within its granted workspace. This is partial ACL enforcement, with the limits above. These checks used no model credentials or real model requests. macOS regression: 253 unit tests and 235 Host tests passed; the Windows-only ACL test was skipped.
 

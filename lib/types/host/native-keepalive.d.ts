@@ -6,8 +6,18 @@ import type { SqliteFusionStore } from '../task/sqlite-store.js';
 import type { SessionBinding } from './bindings.js';
 import type { CacheMode } from './cache-defaults.js';
 import { NativeAuxiliaryRequests } from './native-auxiliary.js';
-/** R19 recovered schedule; one-token output is this plugin's conservative cap. */
+/** R19 recovered schedule. */
 export declare const KEEPALIVE_INTERVAL_MS = 285000;
+/**
+ * The line appended after the copied prefix. maxTokens: 1 is not enough on its own: the ChatGPT Codex route
+ * rejects an output cap and pi-ai omits it, so a ping that said "continue" made the Lead think and call tools
+ * (live log: median 463 output tokens, all ending in tool calls). Measured 2026-10-01 on gpt-6-astra (Codex):
+ * "Reply OK" answered "OK" in 5 output tokens, 0 reasoning, no tool calls, 16/16 with tools still offered,
+ * full cache hit; "continue" called tools 8/8 and a bare "OK" read as approval and produced a plan.
+ * Tool choice and reasoning effort cannot change here: effort is part of OpenAI's cache key (effort "low"
+ * missed the cache entirely) and DSH requests carry no tool_choice.
+ */
+export declare const KEEPALIVE_PROMPT = "Reply OK";
 export declare const KEEPALIVE_ATTEMPTS = 11;
 export interface KeepaliveClock {
     now(): number;
@@ -33,6 +43,7 @@ interface Callbacks {
         hit: boolean;
         cacheRead: number;
         input: number;
+        output?: number;
     }): void;
 }
 export interface KeepaliveRecord {

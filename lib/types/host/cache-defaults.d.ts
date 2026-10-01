@@ -33,6 +33,8 @@ export interface RouteBilling {
         zh: string;
         en: string;
     };
+    /** Interval measured on this route; overrides the model family default. */
+    intervalSeconds?: number;
 }
 export declare const OWN_ROUTES: readonly RouteBilling[];
 export interface CacheDefaults {

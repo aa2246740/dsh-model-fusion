@@ -14,6 +14,7 @@ export interface CacheSample {
     hit: boolean;
     cacheRead: number;
     input: number;
+    output?: number;
 }
 export interface ModelCacheStats {
     schemaVersion: 1;
@@ -28,12 +29,16 @@ export interface ModelCacheStats {
         pings: number;
         pingHits: number;
         pingTokens: number;
+        /** Output tokens of pings; absent on stats recorded before 0.2.3. A route that ignores the output cap shows here. */
+        pingOutputTokens?: number;
         /** Prefix tokens served from cache after a wait, and tokens resent uncached after a wait. */
         keptWarmTokens: number;
         resentTokens: number;
     };
     /** Interval shortened after pings kept missing (never lengthened automatically). */
     learnedIntervalSeconds?: number;
+    /** Rule that produced learnedIntervalSeconds; values from older rules are ignored. */
+    learnedRule?: number;
     updatedAt: string;
 }
 export interface EffectiveCachePolicy {
@@ -45,6 +50,13 @@ export interface EffectiveCachePolicy {
 }
 /** A request counts as a wait when this long passed since the previous request of the same agent. */
 export declare const WAIT_SECONDS = 120;
+/**
+ * Rule 2 (0.2.3): shorten only when most recent pings at this interval missed (3 of the last up to 5).
+ * Rule 1 shortened on 2 misses, and providers also drop single prefixes at random: the live log had
+ * 4 partial misses in 123 pings, each keeping only the shared 3,968-token system+tools head, while
+ * a probe of the same route still hit after 10+ idle minutes. That noise cut a 285 s interval to 214 s.
+ */
+export declare const LEARNING_RULE = 2;
 /** A request reused its prefix when most of its input came from the cache. */
 export declare const cacheHit: (cacheRead: number, input: number) => boolean;
 export declare const clampInterval: (seconds: number) => number;
@@ -126,6 +138,8 @@ export declare function cacheView(policy: CachePolicy, pair?: {
         pings: number;
         pingHits: number;
         pingTokens: number;
+        /** Output tokens of pings; absent on stats recorded before 0.2.3. A route that ignores the output cap shows here. */
+        pingOutputTokens?: number;
         /** Prefix tokens served from cache after a wait, and tokens resent uncached after a wait. */
         keptWarmTokens: number;
         resentTokens: number;
