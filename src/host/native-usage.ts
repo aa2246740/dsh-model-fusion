@@ -13,12 +13,23 @@ import type { NativeAuxiliaryRequests } from './native-auxiliary.js'
 
 export interface UsageOwner { readonly taskId: TaskId; readonly role: Role }
 
-/** DSH counters are disjoint; missing provider fields retain unknown applicability. */
+/**
+ * DSH counters are disjoint; missing provider fields retain unknown applicability.
+ *
+ * A counter is "known" only when the provider reported a real number. Gateways
+ * that fill unsupported aliases with `null` (observed on some claude-opus-5.5
+ * routes, where `completion_tokens_details` is absent and `reasoningTokens`
+ * arrives as `null`) must degrade to `unknown`, not to
+ * `known(null)`: `known(null)` trips the `INVALID_TOKEN_COUNT` guard and aborts
+ * the whole turn.
+ */
 export function billFromNativeUsage(usage: TokenUsage | undefined): CanonicalBill {
-  const count = (value: number | undefined) => value === undefined ? unknown() : known(value)
+  const count = (value: number | undefined | null) =>
+    value === undefined || value === null || !Number.isFinite(value) ? unknown() : known(value)
   return {
     uncachedInput: count(usage?.inputTokens), cacheRead: count(usage?.cacheReadTokens), output: count(usage?.outputTokens),
-    cacheWrite: usage?.cacheWriteTokens === undefined ? { kind: 'unknown' }
+    cacheWrite: usage?.cacheWriteTokens === undefined || usage?.cacheWriteTokens === null
+      || !Number.isFinite(usage?.cacheWriteTokens) ? { kind: 'unknown' }
       : { kind: 'aggregate', rateKey: 'provider-cache-write-rate-unknown', tokens: known(usage.cacheWriteTokens) },
     reasoning: { kind: 'unknown', tokens: count(usage?.reasoningTokens) },
   }

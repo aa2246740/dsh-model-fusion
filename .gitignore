@@ -9,3 +9,4 @@ coverage/
 dist/
 __pycache__/
 benchmark/rebench/work/
+*.tgz
