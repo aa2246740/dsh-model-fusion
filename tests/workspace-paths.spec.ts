@@ -1,5 +1,8 @@
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { normalizeRelativePath, pathAllowed } from '../src/host/workspace.js'
+import { normalizeRelativePath, pathAllowed, workspacePath, workspaceRelative } from '../src/host/workspace.js'
 
 const win32 = process.platform === 'win32'
 
@@ -43,5 +46,39 @@ describe('workspace-relative allowlist paths', () => {
     if (win32) expect(pathAllowed('src\\file.ts', ['src'])).toBe(true)
     // On POSIX `src\file.ts` is a single legal filename and must not match a `src` grant.
     else expect(pathAllowed('src\\file.ts', ['src'])).toBe(false)
+  })
+})
+
+describe('model-supplied paths against the canonical workspace root', () => {
+  // The lease root is a realpath; the session and its models use whatever spelling the user opened
+  // (macOS /tmp/x is /private/tmp/x, and os.tmpdir() itself is under the /var -> /private/var link).
+  const base = mkdtempSync(join(tmpdir(), 'fusion-alias-'))
+  const root = realpathSync.native(base)
+  mkdirSync(join(root, 'project', 'demo'), { recursive: true })
+  mkdirSync(join(root, 'outside'))
+  const project = join(root, 'project')
+  symlinkSync(project, join(root, 'alias'), process.platform === 'win32' ? 'junction' : 'dir')
+  symlinkSync(join(root, 'outside'), join(project, 'escape'), process.platform === 'win32' ? 'junction' : 'dir')
+  const alias = join(base, 'alias')
+
+  it('maps any spelling of the root to the same workspace-relative path', () => {
+    expect(workspaceRelative(project, join(alias, 'calc.py'))).toBe('calc.py')
+    expect(workspaceRelative(project, join(alias, 'demo'))).toBe('demo')
+    expect(workspaceRelative(project, alias)).toBe('')
+    expect(workspaceRelative(project, join(project, 'demo', 'new.py'))).toBe(join('demo', 'new.py'))
+    expect(workspaceRelative(project, join('demo', 'new.py'))).toBe(join('demo', 'new.py'))
+    expect(workspaceRelative(project, '.')).toBe('')
+  })
+
+  it('finds nothing outside the workspace, however the path is spelled', () => {
+    expect(workspaceRelative(project, join(alias, '..', 'outside', 'x'))).toBeUndefined()
+    expect(workspaceRelative(project, join('..', 'outside'))).toBeUndefined()
+    expect(workspaceRelative(project, join(root, 'outside', 'x'))).toBeUndefined()
+    expect(workspaceRelative(project, root)).toBeUndefined()
+  })
+
+  it('does not follow a link below the root; workspacePath refuses it', () => {
+    expect(workspaceRelative(project, join(alias, 'escape', 'x'))).toBe(join('escape', 'x'))
+    expect(() => workspacePath(project, join('escape', 'x'))).toThrow(/symlink/)
   })
 })

@@ -34,8 +34,9 @@ export interface CheckDefinition {
    */
   baseline?: 'no-new-failures'
 }
-/** Parsers that name each failing test, which baseline-relative checks need. */
-export const BASELINE_PARSERS = ['pytest'] as const
+/** Parsers that name each failing test, which baseline-relative checks need. Mocha's default report spreads a name over several lines. */
+export const BASELINE_PARSERS = ['unittest', 'pytest', 'vitest', 'jest', 'tap', 'go', 'cargo'] as const
+export type BaselineParser = typeof BASELINE_PARSERS[number]
 export const TEST_PARSERS = ['unittest', 'pytest', 'vitest', 'jest', 'mocha', 'tap', 'go', 'cargo'] as const
 export type TestParser = typeof TEST_PARSERS[number]
 export const MAX_CHECK_SECONDS = 3_600
@@ -74,7 +75,10 @@ export function freezeChecks(order: WorkOrder, root: string, definitions: readon
     if (definition.kind === 'static-check' && definition.parser !== 'exit-code') throw new Error('Static checks use the exit-code parser')
     if (definition.baseline !== undefined && (definition.baseline !== 'no-new-failures' || definition.kind !== 'test'
       || !(BASELINE_PARSERS as readonly string[]).includes(definition.parser))) {
-      throw new Error(`Acceptance check ${definition.id}: baseline "no-new-failures" needs a test check with a parser that names failing tests (${BASELINE_PARSERS.join(', ')})`)
+      throw new Error(`Acceptance check ${definition.id}: baseline "no-new-failures" needs kind "test" with a parser that names each failing test (${BASELINE_PARSERS.join(', ')}); `
+        + `this check has kind "${definition.kind}" and parser "${definition.parser}". Retry fusion_delegate with `
+        + (definition.parser === 'mocha' ? 'the mocha command run with --reporter tap and parser "tap", ' : 'one of those parsers for this suite, ')
+        + 'or without baseline so every test must pass.')
     }
     for (const path of definition.definitionPaths) {
       if (!lstatSync(workspacePath(root, path), { throwIfNoEntry: false })?.isFile()) {
@@ -107,7 +111,7 @@ export function parseTestCounts(parser: CheckDefinition['parser'], text: string)
       - Number(ok[1]?.match(/skipped=(\d+)/)?.[1] ?? 0) || undefined
   } else if (parser === 'pytest') {
     // The final summary line, e.g. "== 799 passed, 86 skipped, 3 warnings in 12.3s ==".
-    const summary = [...clean.matchAll(/(?:^|\n)[=\s]*((?:\d+ \w+(?:, )?)+) in [\d.]+s/g)].at(-1)?.[1] ?? ''
+    const summary = [...clean.matchAll(/(?:^|\n)[=\s]*((?:\d+ \w+(?: \w+)?(?:, )?)+) in [\d.]+s/g)].at(-1)?.[1] ?? ''
     if (!/\b\d+ (?:failed|errors?)\b/.test(summary)) count = Number(summary.match(/\b(\d+) passed\b/)?.[1])
   } else if (parser === 'vitest') {
     // "Tests  12 passed (12)" or "Tests  12 passed | 2 skipped (14)"; any failure word disqualifies.
@@ -138,20 +142,103 @@ export function parseTestCounts(parser: CheckDefinition['parser'], text: string)
   return count && Number.isSafeInteger(count) && count > 0 ? { executed: count, passed: count, failed: 0 } : undefined
 }
 
+/** What a baseline run needs from each parser; shown when a baseline run cannot be read. */
+const BASELINE_OUTPUT: Record<BaselineParser, string> = {
+  pytest: 'the FAILED/ERROR/SUBFAILED ids of its short summary',
+  unittest: 'a FAIL:/ERROR: header for each failure its FAILED (...) summary counts',
+  vitest: 'a "FAIL file > test" line for each failure its Tests summary counts; a test file that fails to load names no tests',
+  jest: 'a "● test" header for each failure its Tests: summary counts; a suite that fails to run names no tests',
+  tap: 'a described top-level "not ok" line for each failure, matching the 1..N plan',
+  go: 'go test -v output: --- FAIL lines and a final ok/FAIL line for each package',
+  cargo: 'a "test name ... FAILED" line for each failure its test result lines count, with names unique across test binaries',
+}
+
 /**
- * Passed count and the ids of failing tests, only when the output names every failure the summary counts.
- * pytest prints `FAILED <id>` / `ERROR <id>` in its short summary by default (`-r fE`).
+ * Passed count and the ids of failing tests, only when the output names every failure the summary counts:
+ * a failure without a name, or two failures under one name, would let a candidate trade a frozen failure for
+ * a new one. Ids must stay the same across runs, so positions (TAP numbers, durations) are not part of them.
  */
 export function parseTestFailures(parser: CheckDefinition['parser'], text: string): { passed: number; failedIds: string[] } | undefined {
-  const clean = text.replace(/\x1b\[[0-9;]*m/g, '')
-  if (parser !== 'pytest') return undefined
-  const summary = [...clean.matchAll(/(?:^|\n)[=\s]*((?:\d+ \w+(?:, )?)+) in [\d.]+s/g)].at(-1)?.[1]
-  if (!summary) return undefined
-  const count = (word: RegExp) => Number(summary.match(word)?.[1] ?? 0)
-  const failed = count(/\b(\d+) failed\b/) + count(/\b(\d+) errors?\b/)
-  const ids = [...new Set([...clean.matchAll(/(?:^|\n)(?:FAILED|ERROR) (\S+)/g)].map(match => match[1]!))].sort()
-  if (ids.length !== failed) return undefined
-  return { passed: count(/\b(\d+) passed\b/), failedIds: ids }
+  const clean = text.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r\n/g, '\n')
+  const lines = clean.split('\n')
+  const matches = (pattern: RegExp) => lines.flatMap(line => { const match = line.match(pattern); return match ? [match] : [] })
+  let found: { passed: number; failed: number; ids: string[] } | undefined
+  if (parser === 'pytest') {
+    const summary = [...clean.matchAll(/(?:^|\n)[=\s]*((?:\d+ \w+(?: \w+)?(?:, )?)+) in [\d.]+s/g)].at(-1)?.[1]
+    if (!summary) return undefined
+    const count = (word: RegExp) => Number(summary.match(word)?.[1] ?? 0)
+    found = { passed: count(/\b(\d+) passed\b/), failed: count(/\b(\d+) failed\b/) + count(/\b(\d+) errors?\b/),
+      // A failed subtest is counted as a failure and listed as "SUBFAILED(i=1) <id>" (pytest 9) or "SUBFAIL <id>".
+      ids: matches(/^(?:FAILED|ERROR|SUBFAIL(?:ED)?(\([^)]*\))?) (\S+)/).map(match => match[1] ? `${match[2]} ${match[1]}` : match[2]!) }
+  } else if (parser === 'unittest') {
+    const ran = [...clean.matchAll(/Ran (\d+) tests? in /g)].at(-1)
+    const status = [...clean.matchAll(/(?:^|\n)(?:OK|FAILED)(?: \(([^)\n]*)\))?[ \t]*(?=\n|$)/g)].at(-1)
+    if (!ran || !status) return undefined
+    const count = (key: string) => Number(status[1]?.match(new RegExp(`\\b${key}=(\\d+)`))?.[1] ?? 0)
+    // An unexpected success fails the run without a FAIL: header to name it.
+    if (count('unexpected successes')) return undefined
+    const failed = count('failures') + count('errors')
+    found = { passed: Math.max(0, Number(ran[1]) - failed - count('skipped') - count('expected failures')), failed,
+      ids: matches(/^(?:FAIL|ERROR): (.+?)\s*$/).map(match => match[1]!) }
+  } else if (parser === 'vitest' || parser === 'jest') {
+    const summary = parser === 'vitest' ? [...clean.matchAll(/(?:^|\n)\s*Tests\s+([^\n]*?)\s*\(\d+\)/g)].at(-1)?.[1]
+      : [...clean.matchAll(/(?:^|\n)\s*Tests:\s+([^\n]*)/g)].at(-1)?.[1]
+    if (summary === undefined) return undefined
+    const count = (word: RegExp) => Number(summary.match(word)?.[1] ?? 0)
+    let ids: string[]
+    if (parser === 'vitest') {
+      // "FAIL  file > suite > test"; a bare "FAIL  file" is a suite that failed to load, whose tests are not counted.
+      const failures = matches(/^\s*FAIL\s+(.+?)\s*$/).map(match => match[1]!)
+      if (failures.some(id => !id.includes(' > '))) return undefined
+      ids = failures
+    } else {
+      if (/(?:^|\n)\s*● Test suite failed to run/.test(clean)) return undefined
+      // "● suite › test" headers follow the "FAIL file" line of their test file; the file keeps equal titles apart.
+      let file = ''
+      ids = lines.flatMap(line => {
+        file = line.match(/^\s*FAIL\s+(\S+)/)?.[1] ?? file
+        const title = line.match(/^\s*● (.+?)\s*$/)?.[1]
+        return title ? [file ? `${file} › ${title}` : title] : []
+      })
+    }
+    found = { passed: count(/(\d+) passed/), failed: count(/(\d+) failed/), ids }
+  } else if (parser === 'tap') {
+    const plan = [...clean.matchAll(/(?:^|\n)1\.\.(\d+)\s*(?=\n|$)/g)].at(-1)
+    const points = matches(/^(not )?ok\s+\d+\b(.*)$/)
+    const skipped = (point: RegExpMatchArray) => /#\s*SKIP/i.test(point[2]!)
+    if (!plan || Number(plan[1]) !== points.length) return undefined
+    const failures = points.filter(point => point[1] && !skipped(point))
+      .map(point => point[2]!.replace(/\s#\s*(?:TODO|SKIP)\b.*$/i, '').replace(/^\s*-?\s*/, '').trim())
+    if (failures.some(id => !id)) return undefined
+    found = { passed: points.filter(point => !point[1] && !skipped(point)).length, failed: failures.length, ids: failures }
+  } else if (parser === 'go') {
+    // Verbose output lists each package's results, then its "ok"/"FAIL" line. A failed package with no
+    // failing test (build failure, a panic outside a test) is itself the failure.
+    const ids: string[] = []
+    let pending: string[] = [], packages = 0
+    for (const line of lines) {
+      const test = line.match(/^\s*--- FAIL: (\S+)/)?.[1]
+      if (test) { pending.push(test); continue }
+      const result = line.match(/^(ok|FAIL)\s+(\S+)/)
+      if (!result) continue
+      packages++
+      if (result[1] === 'FAIL') ids.push(...pending.length ? pending.map(name => `${result[2]} ${name}`) : [result[2]!])
+      else if (pending.length) return undefined
+      pending = []
+    }
+    if (!packages || pending.length) return undefined
+    found = { passed: matches(/^\s*--- PASS: /).length, failed: ids.length, ids }
+  } else if (parser === 'cargo') {
+    const results = [...clean.matchAll(/test result: \w+\. (\d+) passed; (\d+) failed;/g)]
+    if (!results.length) return undefined
+    found = { passed: results.reduce((sum, match) => sum + Number(match[1]), 0), failed: results.reduce((sum, match) => sum + Number(match[2]), 0),
+      ids: matches(/^test (.+) \.\.\. FAILED$/).map(match => match[1]!) }
+  }
+  if (!found) return undefined
+  const ids = [...new Set(found.ids)].sort()
+  // A report may repeat a failure (jest and vitest list it again in their summaries); distinct names must match the count.
+  if (ids.length !== found.failed) return undefined
+  return { passed: found.passed, failedIds: ids }
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -177,8 +264,10 @@ export function checkPrograms(command: string, platform: NodeJS.Platform = proce
   const programs = new Set<string>()
   // Quoted text is an argument (for example `python3 -c "...; sys.exit(1)"`), never a command boundary.
   // Heredoc bodies are data (hash lists, scripts fed to stdin), not commands.
-  const noHeredocs = command.replace(/<<-?\s*(['"]?)([A-Za-z_]\w*)\1[^\n]*\n[\s\S]*?\n\s*\2\s*(?=\n|$)/g, ' QUOTED ')
-  const unquoted = noHeredocs.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, ' QUOTED ')
+  // Both become NUL, which no program name contains: a quoted word in program position (`"$PY" -m pytest`)
+  // is left unprobed, and a quoted assignment value (`FOO="a b" pytest`) stays one word.
+  const noHeredocs = command.replace(/<<-?\s*(['"]?)([A-Za-z_]\w*)\1[^\n]*\n[\s\S]*?\n\s*\2\s*(?=\n|$)/g, ' \0 ')
+  const unquoted = noHeredocs.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, '\0')
   // A command that sets its own PATH resolves programs somewhere this probe cannot see; its recorded result decides.
   if (/(^|[\s;&|(])(export\s+)?PATH=/.test(unquoted)) return []
   for (const segment of unquoted.split(/&&|\|\||[;|\n&()]/)) {
@@ -338,7 +427,7 @@ export async function runBaselineChecks(input: CheckInput & { checks: readonly F
     const parsed = run.evidence.state === 'completed' && !run.truncated ? parseTestFailures(check.definition.parser, run.text) : undefined
     if (!parsed) {
       throw new Error(`Baseline run of ${check.definition.id} could not be read (exit ${run.evidence.exitCode}, state ${run.evidence.state}). `
-        + 'It needs a completed pytest run whose summary counts match the listed FAILED/ERROR ids. Retry fusion_delegate with a runnable command, or drop baseline to require every test to pass. '
+        + `It needs a completed run with ${BASELINE_OUTPUT[check.definition.parser as BaselineParser]}. Retry fusion_delegate with a runnable command, or drop baseline to require every test to pass. `
         + `Output tail: ${run.text.slice(-600)}`)
     }
     out.push({ definition: check.definition, plan: { ...check.plan, allowedFailures: parsed.failedIds } })

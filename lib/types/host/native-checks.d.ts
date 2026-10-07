@@ -21,8 +21,9 @@ export interface CheckDefinition {
      */
     baseline?: 'no-new-failures';
 }
-/** Parsers that name each failing test, which baseline-relative checks need. */
-export declare const BASELINE_PARSERS: readonly ["pytest"];
+/** Parsers that name each failing test, which baseline-relative checks need. Mocha's default report spreads a name over several lines. */
+export declare const BASELINE_PARSERS: readonly ["unittest", "pytest", "vitest", "jest", "tap", "go", "cargo"];
+export type BaselineParser = typeof BASELINE_PARSERS[number];
 export declare const TEST_PARSERS: readonly ["unittest", "pytest", "vitest", "jest", "mocha", "tap", "go", "cargo"];
 export type TestParser = typeof TEST_PARSERS[number];
 export declare const MAX_CHECK_SECONDS = 3600;
@@ -41,8 +42,9 @@ export declare function freezeChecks(order: WorkOrder, root: string, definitions
  */
 export declare function parseTestCounts(parser: CheckDefinition['parser'], text: string): PlannedReceipt['counts'];
 /**
- * Passed count and the ids of failing tests, only when the output names every failure the summary counts.
- * pytest prints `FAILED <id>` / `ERROR <id>` in its short summary by default (`-r fE`).
+ * Passed count and the ids of failing tests, only when the output names every failure the summary counts:
+ * a failure without a name, or two failures under one name, would let a candidate trade a frozen failure for
+ * a new one. Ids must stay the same across runs, so positions (TAP numbers, durations) are not part of them.
  */
 export declare function parseTestFailures(parser: CheckDefinition['parser'], text: string): {
     passed: number;

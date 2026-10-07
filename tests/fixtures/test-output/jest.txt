@@ -1,0 +1,49 @@
+
+FAIL ./b.test.js
+  ● bad
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: 2
+    Received: 1
+
+    > 1 | test('bad', () => expect(1).toBe(2))
+        |                                     ^
+      2 |
+
+      at Object.<anonymous> (b.test.js:1:37)
+
+FAIL ./a.test.js
+  ● suite › bad
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: 2
+    Received: 1
+
+    > 1 | describe('suite', () => { test('ok', () => expect(1).toBe(1)); test('bad', () => expect(1).toBe(2)) })
+        |                                                                                            ^
+      2 | test('bad', () => expect(1).toBe(3))
+      3 |
+
+      at Object.toBe (a.test.js:1:92)
+
+  ● bad
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: 3
+    Received: 1
+
+      1 | describe('suite', () => { test('ok', () => expect(1).toBe(1)); test('bad', () => expect(1).toBe(2)) })
+    > 2 | test('bad', () => expect(1).toBe(3))
+        |                             ^
+      3 |
+
+      at Object.toBe (a.test.js:2:29)
+
+Test Suites: 2 failed, 2 total
+Tests:       3 failed, 1 passed, 4 total
+Snapshots:   0 total
+Time:        0.524 s
+Ran all test suites.

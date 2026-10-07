@@ -17,6 +17,14 @@ export interface WorkspaceSnapshot {
     id: SnapshotId;
 }
 export declare function workspacePath(root: string, path: string): string;
+/**
+ * The root-relative form of a model-supplied path ('' for the root itself), or undefined outside the workspace.
+ * `root` is the canonical (realpath) workspace, but models write the session's own spelling of it: macOS
+ * `/tmp/x` for `/private/tmp/x`, a symlinked checkout, another drive-letter case. So an absolute path is
+ * matched by the filesystem identity of its ancestors, not by string. The shortest ancestor that is the root
+ * wins, so a link below the root is never followed here; workspacePath still refuses one.
+ */
+export declare function workspaceRelative(root: string, path: string): string | undefined;
 export declare function snapshotWorkspace(cwd: string): WorkspaceSnapshot;
 export declare function changedPaths(before: WorkspaceSnapshot, after: WorkspaceSnapshot): string[];
 /**

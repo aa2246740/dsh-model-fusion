@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import type { Stats } from 'node:fs'
 import { lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs'
-import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { SnapshotId } from '../contracts.js'
 import { digestOf, sha256Hex } from '../digest.js'
 
@@ -34,6 +34,25 @@ export function workspacePath(root: string, path: string): string {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   }
   return absolute
+}
+
+/**
+ * The root-relative form of a model-supplied path ('' for the root itself), or undefined outside the workspace.
+ * `root` is the canonical (realpath) workspace, but models write the session's own spelling of it: macOS
+ * `/tmp/x` for `/private/tmp/x`, a symlinked checkout, another drive-letter case. So an absolute path is
+ * matched by the filesystem identity of its ancestors, not by string. The shortest ancestor that is the root
+ * wins, so a link below the root is never followed here; workspacePath still refuses one.
+ */
+export function workspaceRelative(root: string, path: string): string | undefined {
+  const absolute = resolve(root, path)
+  const ancestors = [absolute]
+  for (let parent = dirname(absolute); parent !== ancestors.at(-1); parent = dirname(parent)) ancestors.push(parent)
+  for (const candidate of ancestors.reverse()) {
+    let real: string
+    try { real = realpathSync.native(candidate) } catch { return undefined }
+    if (real === root) return relative(candidate, absolute)
+  }
+  return undefined
 }
 
 const MAX_ENTRIES = 200_000

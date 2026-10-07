@@ -2,9 +2,9 @@ import LocalSandbox from '@deepseek-ai/dsh-sandbox-local'
 import SandboxPolicy from '@deepseek-ai/dsh-sandbox-policy'
 import { parse as parseYaml } from 'yaml'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync, backup } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
@@ -1419,6 +1419,30 @@ describe('owned native background commands', () => {
     await expect(replacement.resume(parent, 'scripted-only')).rejects.toThrow('recover')
     expect(adapter.requests).toHaveLength(calls)
     expect(readFileSync(join(workspace, 'calc.py'), 'utf8')).toContain('return a - b')
+  })
+})
+
+describe('Sidekick paths in the leased workspace', () => {
+  // The lease holds the realpath; models write the session's spelling (macOS /tmp is /private/tmp, a symlinked checkout).
+  it('accepts any spelling of the project root and its subdirectories, and refuses directories outside it', async () => {
+    const worker: Script = []
+    const { ctx, parent, coordinator, taskId, workspace } = await setup([delegate(), review('accept'), textResponse('Verified.')], worker, { files: true })
+    mkdirSync(join(workspace, 'demo'))
+    const alias = join(dirname(workspace), 'alias')
+    symlinkSync(workspace, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    const probe = (id: string, workdir: string) => toolCallResponse(id, shellTool, { command: shellCommand('pwd', 'Get-Location'), description: 'Show the working directory', workdir })
+    worker.push(probe('root-alias', alias), probe('relative-sub', 'demo'), probe('alias-sub', join(alias, 'demo')), probe('outside', dirname(workspace)),
+      toolCallResponse('write-alias', 'write', { file_path: join(alias, 'calc.py'), content: 'def add(a, b):\n    return a + b\n' }), report())
+    parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Correct addition and preserve the tests.' }] }))
+    await parent.whenIdle()
+    const state = coordinator.state(taskId)
+    expect(state.acceptedChild, JSON.stringify(toolResults(parent))).toBeDefined()
+    const results = await persistedToolResults(ctx, state.acceptedChild!)
+    const outcome = (id: string) => results.find(result => result.message.role === 'tool' && result.message.toolCallId === id)!.message
+    for (const id of ['root-alias', 'relative-sub', 'alias-sub', 'write-alias']) expect(outcome(id).isError, `${id}: ${JSON.stringify(outcome(id))}`).toBeFalsy()
+    expect(JSON.stringify(outcome('outside'))).toContain('is outside it')
+    expect(readFileSync(join(workspace, 'calc.py'), 'utf8')).toBe('def add(a, b):\n    return a + b\n')
+    expect(state, JSON.stringify(results)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
   })
 })
 

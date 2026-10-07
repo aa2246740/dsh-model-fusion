@@ -15,6 +15,12 @@ describe('checkPrograms', () => {
     expect(checkPrograms(`bash -c 'cd x && make test'`)).toEqual(['bash'])
   })
 
+  it('never probes a quoted word as a program', () => {
+    expect(checkPrograms(`"$PY" -m pytest -q`)).toEqual([])
+    expect(checkPrograms(`PY="$(command -v python3)"; "$PY" -m pytest | tee out.txt`)).toEqual(['tee'])
+    expect(checkPrograms(`FOO="a b" pytest -q && echo 'done'`)).toEqual(['pytest', 'echo'])
+  })
+
   it('skips heredoc bodies and digests', () => {
     const command = "shasum -a 256 -c - <<'EOF'\n73d4bda9e3988b2a9d44a514b32e0dfc0ff5c9f6f3de78e63bc6a04479bbf3ec  README.md\nEOF\npython3 -m unittest"
     expect(checkPrograms(command)).toEqual(['shasum', 'python3'])

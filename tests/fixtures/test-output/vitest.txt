@@ -1,0 +1,71 @@
+
+[1m[30m[46m RUN [49m[39m[22m [36mv4.1.11 [39m[90m/private/tmp/fusion-parsers/js[39m
+
+ [31m❯[39m b.test.mjs [2m([22m[2m1 test[22m[2m | [22m[31m1 failed[39m[2m)[22m[32m 5[2mms[22m[39m
+[31m   [31m×[31m bad[39m[32m 4[2mms[22m[39m
+ [31m❯[39m a.test.mjs [2m([22m[2m3 tests[22m[2m | [22m[31m2 failed[39m[2m)[22m[32m 5[2mms[22m[39m
+     [32m✓[39m ok[32m 1[2mms[22m[39m
+[31m     [31m×[31m bad[39m[32m 3[2mms[22m[39m
+[31m   [31m×[31m top bad[39m[32m 0[2mms[22m[39m
+
+[2m Test Files [22m [1m[31m2 failed[39m[22m[90m (2)[39m
+[2m      Tests [22m [1m[31m3 failed[39m[22m[2m | [22m[1m[32m1 passed[39m[22m[90m (4)[39m
+[2m   Start at [22m 23:53:48
+[2m   Duration [22m 174ms[2m (transform 25ms, setup 0ms, import 42ms, tests 10ms, environment 0ms)[22m
+
+
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 3 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m a.test.mjs[2m > [22msuite[2m > [22mbad
+[31m[1mAssertionError[22m: expected 1 to be 2 // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 2[39m
+[31m+ 1[39m
+
+[36m [2m❯[22m a.test.mjs:[2m2:88[22m[39m
+    [90m  1|[39m [35mimport[39m { describe[33m,[39m it[33m,[39m expect } [35mfrom[39m [32m'vitest'[39m
+    [90m  2|[39m describe('suite', () => { it('ok', () => expect(1).toBe(1)); it('bad',…
+    [90m   |[39m                                                                                        [31m^[39m
+    [90m  3|[39m [34mit[39m([32m'top bad'[39m[33m,[39m () [33m=>[39m [34mexpect[39m([34m1[39m)[33m.[39m[34mtoBe[39m([34m3[39m))
+    [90m  4|[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m a.test.mjs[2m > [22mtop bad
+[31m[1mAssertionError[22m: expected 1 to be 3 // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 3[39m
+[31m+ 1[39m
+
+[36m [2m❯[22m a.test.mjs:[2m3:31[22m[39m
+    [90m  1|[39m [35mimport[39m { describe[33m,[39m it[33m,[39m expect } [35mfrom[39m [32m'vitest'[39m
+    [90m  2|[39m describe('suite', () => { it('ok', () => expect(1).toBe(1)); it('bad',…
+    [90m  3|[39m [34mit[39m([32m'top bad'[39m[33m,[39m () [33m=>[39m [34mexpect[39m([34m1[39m)[33m.[39m[34mtoBe[39m([34m3[39m))
+    [90m   |[39m                               [31m^[39m
+    [90m  4|[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m b.test.mjs[2m > [22mbad
+[31m[1mAssertionError[22m: expected 1 to be 2 // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 2[39m
+[31m+ 1[39m
+
+[36m [2m❯[22m b.test.mjs:[2m2:27[22m[39m
+    [90m  1|[39m [35mimport[39m { it[33m,[39m expect } [35mfrom[39m [32m'vitest'[39m
+    [90m  2|[39m [34mit[39m([32m'bad'[39m[33m,[39m () [33m=>[39m [34mexpect[39m([34m1[39m)[33m.[39m[34mtoBe[39m([34m2[39m))
+    [90m   |[39m                           [31m^[39m
+    [90m  3|[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯[22m[39m

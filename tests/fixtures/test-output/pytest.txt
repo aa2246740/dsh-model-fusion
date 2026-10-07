@@ -1,0 +1,36 @@
+FF.s.                                                                  [100%]
+=================================== FAILURES ===================================
+__________________________________ T.test_err __________________________________
+
+self = <test_m.T testMethod=test_err>
+
+>   def test_err(self): raise RuntimeError('x')
+                        ^^^^^^^^^^^^^^^^^^^^^^^
+E   RuntimeError: x
+
+test_m.py:5: RuntimeError
+_________________________________ T.test_fail __________________________________
+
+self = <test_m.T testMethod=test_fail>
+
+>   def test_fail(self): self.assertEqual(1, 2)
+                         ^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: 1 != 2
+
+test_m.py:4: AssertionError
+_______________________________ T.test_sub (i=1) _______________________________
+
+self = <test_m.T testMethod=test_sub>
+
+    def test_sub(self):
+        for i in range(2):
+>           with self.subTest(i=i): self.assertEqual(i, 0)
+                                    ^^^^^^^^^^^^^^^^^^^^^^
+E           AssertionError: 1 != 0
+
+test_m.py:10: AssertionError
+=========================== short test summary info ============================
+FAILED test_m.py::T::test_err - RuntimeError: x
+FAILED test_m.py::T::test_fail - AssertionError: 1 != 2
+SUBFAILED(i=1) test_m.py::T::test_sub - AssertionError: 1 != 0
+3 failed, 2 passed, 1 skipped, 1 subtests passed in 0.02s

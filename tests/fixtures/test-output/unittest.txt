@@ -1,0 +1,39 @@
+
+test_err (test_m.T.test_err) ... ERROR
+test_fail (test_m.T.test_fail) ... FAIL
+test_ok (test_m.T.test_ok) ... ok
+test_skip (test_m.T.test_skip) ... skipped 's'
+test_sub (test_m.T.test_sub) ...
+  test_sub (test_m.T.test_sub) (i=1) ... FAIL
+
+======================================================================
+ERROR: test_err (test_m.T.test_err)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/fusion-parsers/py/test_m.py", line 5, in test_err
+    def test_err(self): raise RuntimeError('x')
+                        ^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: x
+
+======================================================================
+FAIL: test_fail (test_m.T.test_fail)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/fusion-parsers/py/test_m.py", line 4, in test_fail
+    def test_fail(self): self.assertEqual(1, 2)
+                         ~~~~~~~~~~~~~~~~^^^^^^
+AssertionError: 1 != 2
+
+======================================================================
+FAIL: test_sub (test_m.T.test_sub) (i=1)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/fusion-parsers/py/test_m.py", line 10, in test_sub
+    with self.subTest(i=i): self.assertEqual(i, 0)
+                            ~~~~~~~~~~~~~~~~^^^^^^
+AssertionError: 1 != 0
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.004s
+
+FAILED (failures=2, errors=1, skipped=1)

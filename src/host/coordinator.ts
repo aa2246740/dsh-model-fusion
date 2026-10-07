@@ -1,6 +1,5 @@
 import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { isAbsolute, relative } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
@@ -44,7 +43,7 @@ import { NativeFusionActivity } from './native-activity.js'
 import { captureExploration } from './native-exploration.js'
 import { resolveModelOutputLimits } from './model-output.js'
 import { assertWorkerBriefRequest, captureWorkerBrief, workerToolBriefProblem } from './native-worker-brief.js'
-import { changedPaths, pathAllowed, snapshotWorkspace, workspacePath } from './workspace.js'
+import { changedPaths, pathAllowed, snapshotWorkspace, workspacePath, workspaceRelative } from './workspace.js'
 import type { WorkspaceSnapshot } from './workspace.js'
 import { captureChangeBase, saveChangeManifest } from './change-evidence.js'
 import { CachePolicy } from './cache-policy.js'
@@ -759,7 +758,8 @@ export class FusionCoordinator {
     if (['write', 'edit', 'str_replace_editor'].includes(exec.name)) {
       const args = exec.arguments as { file_path?: unknown; path?: unknown }, raw = args.file_path ?? args.path
       if (typeof raw !== 'string') return 'A native edit must identify its workspace path'
-      const path = isAbsolute(raw) ? relative(lease.workspaceId, raw) : raw
+      const path = workspaceRelative(lease.workspaceId, raw)
+      if (path === undefined) return `Path escapes the workspace: ${JSON.stringify(raw)} is outside the project root ${lease.workspaceId}`
       try { workspacePath(lease.workspaceId, path) } catch (error) { return String(error) }
       if (state.currentWorkOrder && !pathAllowed(path, state.currentWorkOrder.allowedPaths)) return 'The edit is outside frozen allowedPaths'
     }
@@ -769,7 +769,11 @@ export class FusionCoordinator {
         const issue = this.effects.backgroundProblem(exec)
         if (issue) return issue
       }
-      if (args.workdir && args.workdir !== lease.workspaceId) return 'Shell commands must use the frozen project root'
+      if (args.workdir) {
+        const dir = workspaceRelative(lease.workspaceId, args.workdir)
+        if (dir === undefined) return `Shell commands run inside the project root ${lease.workspaceId}; workdir ${JSON.stringify(args.workdir)} is outside it. Omit workdir or pass a directory inside the project.`
+        try { if (dir) workspacePath(lease.workspaceId, dir) } catch (error) { return String(error) }
+      }
       const nested = this.#nestedChecks.get(exec.callId)
       if (role === 'lead' && state.intent === 'DELEGATE' && !this.#runtime(binding.taskId).takeover
         && (!nested || nested.agent !== exec.agent || nested.parent !== exec.parent)) {
