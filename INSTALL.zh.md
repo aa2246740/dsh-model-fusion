@@ -4,24 +4,32 @@
 
 需要 **DeepSeek Harness 0.2.0-rc.2**，其他版本不支持。
 
-## DSH Studio 桌面版（推荐）
+## 在 DeepSeek Harness 网页版或桌面端安装
 
-点左侧栏的 **插件** → **添加插件**，在"包名或地址"里填：
+在 **添加插件** 向导的搜索框中填入 `dsh-model-fusion`，点击 **Install**：
 
-```text
-dsh-model-fusion@0.2.7
-```
+![Add plugin wizard](https://raw.githubusercontent.com/aa2246740/dsh-model-fusion/main/docs/add-plugin-wizard.png)
 
-发布版本已包含构建好的 `lib/`，不需要克隆或编译。装好后退出并重新打开 DSH Studio（插件在下次启动时生效）。
+发布版本已包含构建好的 `lib/`，不需要克隆或编译。
 
-## Web 命令行
+## 使用 `dsh` 命令行安装
+
+从 [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh) 安装 [`dsh-model-fusion`](https://www.npmjs.com/package/dsh-model-fusion) 插件：
 
 ```sh
-dsh plugin --profile web add dsh-model-fusion@0.2.7
+dsh plugin --profile web add dsh-model-fusion
 ```
 
-`dsh` 不在 PATH 里时：`npx @deepseek-ai/dsh@0.2.0-rc.2 plugin --profile web add dsh-model-fusion@0.2.7`。
-这只会写入 `web` 配置。正在运行的 Web 服务需要重新打开一次，再刷新页面。
+更新 `dsh-model-fusion` 插件：
+
+```sh
+dsh plugin --profile web update dsh-model-fusion@latest
+```
+
+然后用 `dsh web` 启动 Web 界面。无需构建、无需重启。
+
+`dsh` 不在 PATH 里时：`npx @deepseek-ai/dsh@0.2.0-rc.2 plugin --profile web add dsh-model-fusion`。
+这条命令只写入 `web` profile，不修改桌面 App 的 profile；桌面端请使用上面的"添加插件"向导。
 
 ## 装好之后
 
