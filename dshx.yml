@@ -35,4 +35,5 @@ hotReload:
     - src/host/native-usage.ts
     - src/host/native-budget.ts
     - src/profile/resolve.ts
-    - src/prompts.ts
+    - src/task/status-index.ts
+    - src/host/compaction-routing.ts

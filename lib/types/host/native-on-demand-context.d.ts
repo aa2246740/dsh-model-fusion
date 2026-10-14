@@ -23,7 +23,7 @@ export declare class NativeOnDemandContext {
                 text: string;
             }[];
         };
-    } & Pick<import("@deepseek-ai/dsh-llm").UserMessage, "id" | "role">) | undefined;
+    } & Pick<import("@deepseek-ai/dsh-llm").UserMessage, "role" | "id">) | undefined;
     blocked(agent: Agent, binding: SessionBinding): string | undefined;
     read(agent: Agent, binding: SessionBinding, role: Role, offset?: number, limit?: number): {
         bytes: number;

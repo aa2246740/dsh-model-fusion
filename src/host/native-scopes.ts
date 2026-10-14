@@ -17,6 +17,7 @@ export interface FusionScopeCallbacks {
   /** All independent pause, budget, recovery and unknown-effect gates are checked here. */
   canAccess?(agent: Agent, binding: SessionBinding, role: Role): string | undefined
   /** Shared gates plus limits that apply only to admitting a new generation. */
+  prepareRequest?(agent: Agent, binding: SessionBinding, role: Role, signal: AbortSignal): Promise<void>
   canRequest(agent: Agent, binding: SessionBinding, role: Role): string | undefined
   canExecute(exec: Readonly<ToolExecution>, binding: SessionBinding, role: Role): string | undefined
   beforeRequest(agent: Agent, turn: number, step: number, binding: SessionBinding, role: Role): void
@@ -101,7 +102,10 @@ export class NativeFusionScopes {
       } catch (error) { entry.ready = false; throw error }
     }))
     entry.dispose.push(scope.on('agent/pre-step', async (payload, next) => {
-      if (payload.agent !== agent || !entry.ready || this.callbacks.canRequest(agent, entry.binding, role)) return { kind: 'reject' }
+      if (payload.agent !== agent || !entry.ready) return { kind: 'reject' }
+      await this.callbacks.prepareRequest?.(agent, entry.binding, role, payload.signal)
+      payload.signal.throwIfAborted()
+      if (this.callbacks.canRequest(agent, entry.binding, role)) return { kind: 'reject' }
       this.callbacks.beforeStep?.(agent, entry.binding, role)
       const decision = await next()
       if (decision.kind === 'reject') return decision
@@ -126,8 +130,10 @@ export class NativeFusionScopes {
         ...(readOnlyTools === undefined ? {} : { tools: assembled.tools.filter(tool => readOnlyTools?.includes(tool.name)
           || role === 'worker' && ['fusion_read_state', 'fusion_read_evidence', 'fusion_submit_result'].includes(tool.name)) }) }
     }, { prepend: true }))
-    entry.dispose.push(scope.on('agent/request', async ({ agent: requesting, turn, step }, next) => {
+    entry.dispose.push(scope.on('agent/request', async ({ agent: requesting, turn, step, signal }, next) => {
       this.assertReady(requesting)
+      await this.callbacks.prepareRequest?.(requesting, entry.binding, role, signal)
+      signal.throwIfAborted()
       const reason = this.callbacks.canRequest(requesting, entry.binding, role)
       if (reason) throw new Error(reason)
       const config = await next()

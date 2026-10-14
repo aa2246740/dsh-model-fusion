@@ -22,7 +22,7 @@ import { BindingRepository, type SessionBinding } from './host/bindings.js'
 import { FusionCoordinator } from './host/coordinator.js'
 import { authorizeConfiguredPair, NativeRequestBudget } from './host/native-budget.js'
 import { json, readJson, trustedRequest } from './host/http.js'
-import { readFusionStatus } from './host/status.js'
+import { readFusionStatusAsync } from './host/status.js'
 import { readHistoricalFusionActivity } from './host/native-activity.js'
 import { nativeShellTool } from './host/shell.js'
 
@@ -125,7 +125,16 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         if (url.searchParams.get('view') === 'history') return json(res, 200, readHistory(store, url.searchParams.get('cursor') ?? ''))
         if (url.searchParams.get('view') === 'activity') return json(res, 200, await readHistoricalFusionActivity(ctx, store,
           url.searchParams.get('sessionId') ?? '', url.searchParams.get('callId') ?? '', Number(url.searchParams.get('after') ?? -1)))
-        if (url.searchParams.get('view') === 'status') return json(res, 200, readFusionStatus(store, url.searchParams.get('sessionId') ?? ''))
+        if (url.searchParams.get('view') === 'status') {
+          const abort = new AbortController(), disconnected = () => abort.abort()
+          res.once('close', disconnected)
+          try {
+            const status = await readFusionStatusAsync(store, url.searchParams.get('sessionId') ?? '', abort.signal)
+            if (!res.destroyed) return json(res, 200, status)
+            return
+          } catch (error) { if (!abort.signal.aborted) throw error; return }
+          finally { res.off('close', disconnected) }
+        }
         if (url.searchParams.get('view') === 'catalog') return json(res, 200, await ctx.sessionController.modelCatalog())
         if (url.searchParams.get('view') === 'cache') {
           let profile: ResolvedProfile | undefined

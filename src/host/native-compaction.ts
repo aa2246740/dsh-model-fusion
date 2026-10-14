@@ -10,8 +10,18 @@ import type { PairProfile, PhysicalRoute } from '../contracts.js'
 export function routeNativeCompaction(request: GenerateOptions, profile: PairProfile, effectiveRoute?: PhysicalRoute): void {
   const choice = profile.compactor ?? (effectiveRoute && profile.interactionMode === 'model-like' ? { route: effectiveRoute, maxOutputTokens: request.maxTokens } : undefined)
   if (request.purpose !== 'compaction' || !choice) return
-  if (isAgentLoopRequest(request) || Object.isFrozen(request)) {
+  if (isAgentLoopRequest(request)) {
     throw new Error('DSH 压缩请求已冻结，无法通过公开接口选择压缩模型')
+  }
+  if (Object.isFrozen(request)) {
+    // A compactor can pin its envelope after resolving the public session route
+    // and planning against that exact model. Validate; never enlarge its cap.
+    if (request.provider !== choice.route.provider || request.model !== choice.route.model
+      || request.reasoningEffort !== choice.route.reasoningEffort
+      || !Number.isSafeInteger(request.maxTokens) || Number(request.maxTokens) <= 0
+      || choice.maxOutputTokens !== undefined && request.maxTokens! > choice.maxOutputTokens)
+      throw new Error('压缩请求已冻结，且与已规划的模型或输出上限不一致')
+    return
   }
   request.provider = choice.route.provider
   request.model = choice.route.model

@@ -35,6 +35,8 @@ import CodeRuntime from '@deepseek-ai/dsh-ptc-runtime-node'
 import { JobId } from '@deepseek-ai/dsh-jobs'
 import { FusionCoordinator } from '../src/host/coordinator.js'
 import { SqliteFusionStore } from '../src/task/sqlite-store.js'
+import { sha256Hex } from '../src/digest.js'
+import { newLedger } from '../src/usage/ledger.js'
 import { completeProfile } from '../src/profile/resolve.js'
 import { loadPromptBundle } from '../src/prompts.js'
 import { FusionCatalogAdapter, FUSION_PROVIDER, FUSION_MODEL, installNativeFusionSelection } from '../src/host/native-selection.js'
@@ -226,6 +228,68 @@ const findings = (id = 'findings') => toolCallResponse(id, 'fusion_submit_result
   sources: [{ path: 'calc.py', startLine: 1, endLine: 2 }],
 })
 const readCalc = () => toolCallResponse('read-calc', 'read', { file_path: 'calc.py' })
+
+describe('legacy status readiness before coordinator actions', () => {
+  function seed(store: SqliteFusionStore, taskId: string, count: number) {
+    const db = new DatabaseSync(store.filename)
+    const put = db.prepare('INSERT INTO documents VALUES (?,1,?,?)')
+    db.exec('BEGIN IMMEDIATE')
+    for (let i = 0; i < count; i++) {
+      const id = `legacy-${i}`, key = { provider: 'fixture', model: 'worker', requestId: id, attemptId: id, contractDigest: 'fixture' }
+      const value = { schemaVersion: 1, taskId, sessionId: 'legacy-worker', role: 'worker', purpose: i < count - 945 ? 'compaction' : 'conversation',
+        startedAt: '2026-10-13T00:00:00Z', endedAt: '2026-10-13T00:00:01Z', outcome: 'stop', ledger: newLedger(key) }
+      const json = JSON.stringify(value); put.run(`usage:${taskId}:${id}`, json, sha256Hex(Buffer.from(json)))
+    }
+    db.exec('COMMIT'); db.close()
+  }
+  it('prepares a legacy task on its first native request without HTTP and shares concurrent reads', async () => {
+    const { parent, store, taskId, adapter } = await setup([textResponse('Ready.')])
+    const count = Number(process.env.FUSION_STATUS_REVIEW_ROWS ?? 2048)
+    seed(store, taskId, count)
+    const calls = vi.spyOn(store, 'statusSnapshot')
+    let ticks = 0, last = performance.now(), maxGap = 0
+    const timer = setInterval(() => { ticks++; const now = performance.now(); maxGap = Math.max(maxGap, now - last); last = now }, 1)
+    const started = performance.now()
+    try {
+      parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Check readiness.' }] }))
+      await new Promise<void>(resolve => setImmediate(resolve))
+      const concurrent = store.statusSnapshotAsync(index => index.workerConversations(taskId))
+      await parent.whenIdle()
+      expect(await concurrent).toBe(945)
+      expect(adapter.requests).toHaveLength(1)
+      expect(calls.mock.calls.every(([, backfill]) => backfill === false)).toBe(true)
+      const summary = store.statusSnapshot(index => index.read(taskId), false)
+      expect(summary.usage.calls).toBe(count + 1)
+      expect(summary.usage.compactionCalls).toBe(count - 945)
+      expect(ticks).toBeGreaterThan(1)
+      const evidence = { scenario: 'coordinator-first-no-http', count, wallMs: performance.now() - started, ticks, maxGapMs: maxGap, workerConversations: 945, calls: summary.usage.calls }
+      if (process.env.FUSION_STATUS_REVIEW_OUTPUT) writeFileSync(`${process.env.FUSION_STATUS_REVIEW_OUTPUT}-first.json`, JSON.stringify(evidence))
+    } finally { clearInterval(timer); calls.mockRestore() }
+  }, 30000)
+
+  it('cancels a direct coordinator action mid-backfill and resumes after runtime/store restart', async () => {
+    const { ctx, parent, coordinator, store, taskId, adapter } = await setup([textResponse('Resumed.')])
+    seed(store, taskId, 2048)
+    const abort = new AbortController(), callId = ToolCallId('readiness-test')
+    const exec: Parameters<FusionCoordinator['rework']>[2] = { agent: parent, name: 'fusion_rework', arguments: {}, signal: abort.signal,
+      callId, rootCallId: callId, token: Symbol('test') as Parameters<FusionCoordinator['rework']>[2]['token'], deferContext() {}, concludeTurn() {} }
+    setImmediate(() => abort.abort())
+    await expect(coordinator.rework(parent, 'Continue', exec)).rejects.toThrow()
+    expect(adapter.requests).toHaveLength(0)
+    const db = new DatabaseSync(store.filename)
+    const remaining = Number(db.prepare('SELECT count(*) n FROM fusion_status_dirty_v1').get()!.n)
+    db.close(); expect(remaining).toBe(2048 - 256)
+    await coordinator.close()
+    const reopened = new SqliteFusionStore(store.filename), restored = new FusionCoordinator(ctx, reopened, coordinator.options)
+    cleanups.push(async () => { await restored.close(); reopened.close() })
+    parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Resume after cancellation.' }] }))
+    await parent.whenIdle()
+    expect(adapter.requests).toHaveLength(1)
+    expect(reopened.statusSnapshot(index => index.workerConversations(taskId), false)).toBe(945)
+    expect(reopened.statusSnapshot(index => index.read(taskId), false).usage.calls).toBe(2049)
+    if (process.env.FUSION_STATUS_REVIEW_OUTPUT) writeFileSync(`${process.env.FUSION_STATUS_REVIEW_OUTPUT}-restart.json`, JSON.stringify({ scenario: 'direct-coordinator-cancel-restart', remaining, calls: 2049, workerConversations: 945 }))
+  })
+})
 
 describe('delegation preflight and direct preparation', () => {
   const withDefinitions = (paths: string[]) => toolCallResponse('invalid-delegate', 'fusion_delegate', {

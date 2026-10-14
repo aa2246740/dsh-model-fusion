@@ -1,21 +1,9 @@
 import { readModelControl } from './native-model-control.js'
 import type { TaskState } from '../task/state.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
-import type { Role, TaskId, TokenMeasurement } from '../contracts.js'
-import type { FusionStatus, UsageSubtotal } from '../status.js'
-import { projectLedger, restoreLedger, type Count } from '../usage/ledger.js'
+import type { StatusIndex } from '../task/status-index.js'
+import type { FusionStatus } from '../status.js'
 import { BindingRepository } from './bindings.js'
-import type { NativeUsageRecord } from './native-usage.js'
-import type { RoleUsage } from '../status.js'
-
-interface EffectRow {
-  schemaVersion: 1; taskId: TaskId; role: Role; toolName: string; state: string
-  nativeIsError?: boolean; startedAt: string
-}
-interface ContextRow {
-  schemaVersion: 1; taskId: TaskId; role: Role; purpose: string; checkedAt: string
-  measurement: TokenMeasurement; budget: number; admitted: boolean
-}
 
 /** English copies of the stage and detail texts; the client shows them when DSH runs in English. */
 const EN: Record<string, string> = {
@@ -75,33 +63,22 @@ export function taskStage(state: TaskState, checking: boolean, workerStepLimitRe
   }
 }
 
-function subtotal(counts: (Count | undefined)[]): UsageSubtotal {
-  const known = counts.filter((count): count is Extract<Count, { state: 'known' }> => count?.state === 'known')
-  return { knownTokens: known.reduce((sum, count) => sum + count.tokens, 0),
-    reportedRequests: known.length, totalRequests: counts.length }
-}
-
 /** Reads existing durable facts only. Polling never constructs a runtime or calls a model. */
 export function readFusionStatus(store: SqliteFusionStore, sessionId: string): FusionStatus {
+  return store.statusSnapshot(index => readStatus(store, sessionId, index))
+}
+
+export function readFusionStatusAsync(store: SqliteFusionStore, sessionId: string, signal?: AbortSignal): Promise<FusionStatus> {
+  return store.statusSnapshotAsync(index => readStatus(store, sessionId, index), signal)
+}
+
+function readStatus(store: SqliteFusionStore, sessionId: string, index: StatusIndex): FusionStatus {
   const binding = new BindingRepository(store).read(sessionId)?.binding
   const base: FusionStatus = { schemaVersion: 1, sessionId, selected: Boolean(binding?.selected), observedAt: new Date().toISOString() }
   if (!binding?.selected) return base
   const taskId = binding.taskId, state = store.load(taskId)
   if (!state || state.parent !== sessionId || state.profileDigest !== binding.profile.digest) throw new Error('Fusion 任务记录不一致，请检查存档')
-  const rows = <T extends { schemaVersion: number; taskId: TaskId }>(prefix: string): { id: string; row: T }[] =>
-    store.listDocumentIds(`${prefix}:${taskId}:`).map(id => {
-      const row = store.readDocument(id)?.value as T | undefined
-      if (!row || row.schemaVersion !== 1 || row.taskId !== taskId) throw new Error('Fusion 状态记录需要检查')
-      return { id, row }
-    })
-  const usage = rows<NativeUsageRecord>('usage').map(({ id, row }) => ({ id, row, projection: projectLedger(restoreLedger(row.ledger)) }))
-  const effects = rows<EffectRow>('native-effect')
-  const checking = store.listDocumentIds(`check-invocation:${taskId}:`).some(id => {
-    const row = store.readDocument(id)?.value as { evidence?: { taskId?: string; state?: string } } | undefined
-    if (!row?.evidence || row.evidence.taskId !== taskId) throw new Error('Fusion 验证记录需要检查')
-    return row.evidence.state === 'started'
-  })
-  const contexts = rows<ContextRow>('context-request').sort((a, b) => b.row.checkedAt.localeCompare(a.row.checkedAt))
+  const { checking, ...facts } = index.read(taskId)
   const runtime = store.readDocument(`runtime:${taskId}`)?.value as { schemaVersion?: number; taskId?: string;
     workerStepStop?: { workOrderId?: string; requests: number; limit: number };
     workerFailure?: { workOrderId?: string; childId?: string; category?: string } } | undefined
@@ -125,32 +102,9 @@ export function readFusionStatus(store: SqliteFusionStore, sessionId: string): F
     detailEn: 'detailEn' in stage && stage.detailEn ? stage.detailEn : english(stage.detail) ?? null, ...(modelControl ? { modelControl } : {}), verification: state.verification,
     workerId: state.acceptedChild ?? binding.workerId ?? null,
     models: { lead: modelControl?.routes.lead ?? binding.profile.lead, worker: modelControl?.routes.worker ?? binding.profile.worker, compactor: binding.profile.compactor?.route ?? null },
-    usage: { calls: usage.length, finalCalls: usage.filter(item => item.projection.authority === 'final').length,
-      provisionalCalls: usage.filter(item => item.projection.authority === 'provisional').length,
-      unreportedCalls: usage.filter(item => item.projection.authority === 'none').length,
-      compactionCalls: usage.filter(item => item.row.purpose === 'compaction').length,
-      keepaliveCalls: usage.filter(item => item.row.purpose === 'cache-keepalive').length,
-      input: subtotal(usage.map(item => item.projection.bill?.uncachedInput)),
-      cacheRead: subtotal(usage.map(item => item.projection.bill?.cacheRead)),
-      output: subtotal(usage.map(item => item.projection.bill?.output)), actualBilledUsd: null, upstreamHttpCalls: null,
-      byRole: Object.fromEntries((['lead', 'worker'] as const).map(role => {
-        const own = usage.filter(item => item.row.role === role)
-        return [role, { calls: own.length, input: subtotal(own.map(item => item.projection.bill?.uncachedInput)),
-          cacheRead: subtotal(own.map(item => item.projection.bill?.cacheRead)), output: subtotal(own.map(item => item.projection.bill?.output)) }]
-      })) as Record<'lead' | 'worker', RoleUsage> },
+    ...facts,
     automatedChecks: Array.isArray((runtime as { checks?: unknown[] } | undefined)?.checks) && runtime?.taskId === taskId
       ? (runtime as { checks: unknown[] }).checks.length : null,
-    requests: usage.sort((a, b) => b.row.startedAt.localeCompare(a.row.startedAt)).slice(0, 12).map(({ id, row, projection }) => ({
-      id, role: row.role, purpose: row.purpose, provider: row.ledger.key.provider, model: row.ledger.key.model,
-      outcome: row.outcome, authority: projection.authority, startedAt: row.startedAt })),
-    tools: effects.sort((a, b) => b.row.startedAt.localeCompare(a.row.startedAt)).slice(0, 8).map(({ id, row }) => ({
-      id, role: row.role, name: row.toolName, state: row.state, failed: row.nativeIsError === true, startedAt: row.startedAt })),
-    contexts: (['lead', 'worker'] as const).flatMap(role => {
-      const row = contexts.find(item => item.row.role === role)?.row
-      return row ? [{ role, purpose: row.purpose, inputTokens: row.measurement.inputTokens, budget: row.budget,
-        quality: row.measurement.quality, admitted: row.admitted, checkedAt: row.checkedAt }] : []
-    }),
     pendingApprovals: state.control.pendingApprovalIds.length,
-    unsettledTools: effects.filter(({ row }) => row.state === 'dispatch-started' || row.state === 'outcome-unknown').length,
   } }
 }

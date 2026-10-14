@@ -1,3 +1,5 @@
+import { setImmediate as yieldToLoop } from 'node:timers/promises'
+import { StatusIndex, StatusDataError, StatusPending } from './status-index.js'
 import { taskSummary } from '../host/history.js'
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'node:fs'
@@ -14,6 +16,7 @@ import type { ArtifactRecord, DiskSnapshot, FusionStore } from './store.js'
 /** Durable Host backend. Every read is fresh; CAS and outbox writes share one transaction. */
 export class SqliteFusionStore implements FusionStore {
   readonly #db: DatabaseSync
+  readonly #status: StatusIndex
 
   constructor(readonly filename: string) {
     if (filename !== ':memory:') mkdirSync(dirname(filename), { recursive: true })
@@ -33,7 +36,39 @@ export class SqliteFusionStore implements FusionStore {
           COMMIT;`)
       }
       this.#db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
+      this.#status = new StatusIndex(this.#db)
     } catch (error) { this.#db.close(); throw error }
+  }
+
+  statusSnapshot<T>(read: (index: StatusIndex) => T, backfill = true): T {
+    for (;;) {
+      try {
+        const result = this.#transaction(() => {
+          try { return { value: read(this.#status) } } catch (error) {
+            // Keep invalid-row markers durable rather than retrying their backfill on every poll.
+            if (error instanceof StatusDataError) return { error }
+            throw error
+          }
+        })
+        if ('error' in result) throw result.error
+        return result.value
+      } catch (error) {
+        if (!(error instanceof StatusPending) || !backfill) throw error
+        while (this.#transaction(() => this.#status.flushBatch(error.task))) { /* release the writer lock between batches */ }
+      }
+    }
+  }
+
+  /** HTTP reads yield between committed batches; cancellation retains resumable progress. */
+  async statusSnapshotAsync<T>(read: (index: StatusIndex) => T, signal?: AbortSignal): Promise<T> {
+    for (;;) {
+      signal?.throwIfAborted()
+      try { return this.statusSnapshot(read, false) } catch (error) {
+        if (!(error instanceof StatusPending)) throw error
+        this.#transaction(() => this.#status.flushBatch(error.task))
+        await yieldToLoop(undefined, { signal })
+      }
+    }
   }
 
   close(): void { this.#db.close() }
@@ -180,6 +215,7 @@ export class SqliteFusionStore implements FusionStore {
     const revision = expectedRevision + 1
     this.#db.prepare('INSERT INTO documents VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, json=excluded.json, checksum=excluded.checksum')
       .run(id, revision, json, sha256Hex(Buffer.from(json)))
+    this.#status.sync(id)
     return revision
   }
 

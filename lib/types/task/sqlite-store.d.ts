@@ -1,3 +1,4 @@
+import { StatusIndex } from './status-index.js';
 import type { ArtifactRef, FusionEvent, OutboxRow, OutboxState, TaskId } from '../contracts.js';
 import type { PersistedTask, TaskState } from './state.js';
 import type { ArtifactRecord, FusionStore } from './store.js';
@@ -6,6 +7,9 @@ export declare class SqliteFusionStore implements FusionStore {
     #private;
     readonly filename: string;
     constructor(filename: string);
+    statusSnapshot<T>(read: (index: StatusIndex) => T, backfill?: boolean): T;
+    /** HTTP reads yield between committed batches; cancellation retains resumable progress. */
+    statusSnapshotAsync<T>(read: (index: StatusIndex) => T, signal?: AbortSignal): Promise<T>;
     close(): void;
     listTaskIds(): readonly TaskId[];
     listDocumentIds(prefix: string): readonly string[];
