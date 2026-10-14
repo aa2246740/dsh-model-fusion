@@ -5,13 +5,14 @@ import { isAbsolute, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import type { ModelModality } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { FusionCatalogAdapter, FUSION_PROVIDER, FUSION_MODEL, installNativeFusionSelection } from './host/native-selection.js'
 import type { ResolvedProfile } from './profile/resolve.js'
-import { choiceFromProfile, modelProfileFromChoice, validatePairChoice } from './host/settings.js'
+import { choiceFromProfile, modelProfileFromChoice, validatePairChoice, savedLeadRoute } from './host/settings.js'
 import { CachePolicy, cacheView } from './host/cache-policy.js'
 import { CACHE_DEFAULTS_CHECKED } from './host/cache-defaults.js'
 import { loadJsonObject, resolveProfile } from './profile/resolve.js'
@@ -97,7 +98,22 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     })().finally(() => { creating = undefined })
     return creating
   }
-  ctx.effect(() => ctx.llm.registerAdapter([FUSION_PROVIDER], new FusionCatalogAdapter()))
+  // The catalog entry admits what the configured Lead admits: the Lead is the
+  // only role that reads user content, while the Worker receives text work orders.
+  const leadInputModalities = async (): Promise<readonly ModelModality[] | undefined> => {
+    try {
+      const saved = store.readDocument('settings:profile')?.value
+      const lead = savedLeadRoute(saved)
+        ?? (config.profilePath && isAbsolute(config.profilePath) ? savedLeadRoute(loadJsonObject(config.profilePath)) : undefined)
+      if (!lead) return undefined
+      return (await ctx.llm.resolveModelInfo(lead.provider, lead.model)).inputModalities
+    } catch {
+      // An unresolvable Lead route (unregistered provider, retired model, broken
+      // profile file) cannot verify image support; the catalog entry stays text-only.
+      return undefined
+    }
+  }
+  ctx.effect(() => ctx.llm.registerAdapter([FUSION_PROVIDER], new FusionCatalogAdapter(leadInputModalities)))
   ctx.effect(() => installNativeFusionSelection(ctx, {
     coordinator: () => runtime, profile: () => defaultProfile,
     selection: agent => {

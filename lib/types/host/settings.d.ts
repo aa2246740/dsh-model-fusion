@@ -23,6 +23,11 @@ export interface SettingsCatalog {
         }[];
     }[];
 }
+/** Saved Lead route from a raw settings or profile document, or undefined when unconfigured or pointed at Fusion itself. */
+export declare function savedLeadRoute(value: unknown): {
+    provider: string;
+    model: string;
+} | undefined;
 /** Configuration chooses registered physical models; it cannot create adapters. */
 export declare function validatePairChoice(value: unknown, catalog: SettingsCatalog): PairChoice;
 /** New sessions can opt into this Worker cap. Frozen sessions keep their saved profile. */

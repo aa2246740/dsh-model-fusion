@@ -17,6 +17,16 @@ export interface SettingsCatalog {
   }[] }[]
 }
 
+/** Saved Lead route from a raw settings or profile document, or undefined when unconfigured or pointed at Fusion itself. */
+export function savedLeadRoute(value: unknown): { provider: string; model: string } | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const route = (value as Record<string, unknown>).lead
+  if (!route || typeof route !== 'object' || Array.isArray(route)) return undefined
+  const provider = (route as Record<string, unknown>).provider, model = (route as Record<string, unknown>).model
+  if (typeof provider !== 'string' || typeof model !== 'string' || provider === FUSION_PROVIDER) return undefined
+  return { provider, model }
+}
+
 /** Configuration chooses registered physical models; it cannot create adapters. */
 export function validatePairChoice(value: unknown, catalog: SettingsCatalog): PairChoice {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(bi('请选择 Lead 和 Worker', 'Choose a Lead and a Sidekick'))
