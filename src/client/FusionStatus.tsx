@@ -1,6 +1,7 @@
 import { FusionRecovery } from './FusionRecovery.js'
-import { Fragment, useEffect, useState } from 'react'
-import type { FusionStatus as Status, UsageSubtotal } from '../status.js'
+import { Fragment, useState } from 'react'
+import { useFusionStatus } from './status-polling.js'
+import type { UsageSubtotal } from '../status.js'
 import { tr, useLang, type Lang } from './i18n.js'
 
 const styles = `
@@ -36,43 +37,8 @@ export function FusionStatus({ sessionId, attentionOnly = false }: { sessionId: 
   const lang = useLang()
   const purpose = (value: string) => purposeOf(lang, value), outcome = (value: string) => outcomeOf(lang, value)
   const toolState = (value: string) => toolStateOf(lang, value), count = (value: UsageSubtotal) => countOf(lang, value)
-  const [snapshot, setSnapshot] = useState<{ sessionId: string; status?: Status; failed: boolean }>()
-  useEffect(() => {
-    let active = true, busy = false, timer: ReturnType<typeof setTimeout> | undefined
-    let abort: AbortController | undefined
-    const visible = () => document.visibilityState !== 'hidden'
-    const refresh = async () => {
-      if (!active || busy || !visible()) return
-      if (timer) clearTimeout(timer)
-      busy = true; abort = new AbortController()
-      const deadline = setTimeout(() => {
-        if (active && visible()) setSnapshot({ sessionId, failed: true })
-        abort?.abort()
-      }, 10000)
-      try {
-        const response = await fetch(`/api/model-fusion?view=status&sessionId=${encodeURIComponent(sessionId)}`,
-          { credentials: 'same-origin', cache: 'no-store', signal: abort.signal })
-        if (!response.ok) throw new Error('unavailable')
-        const status = await response.json() as Status
-        if (status.schemaVersion !== 1 || status.sessionId !== sessionId) throw new Error('mismatched status')
-        if (active && !abort.signal.aborted) setSnapshot({ sessionId, status, failed: false })
-      } catch {
-        if (active && !abort.signal.aborted) setSnapshot({ sessionId, failed: true })
-      } finally {
-        clearTimeout(deadline)
-        busy = false
-        if (active && visible()) timer = setTimeout(() => { void refresh() }, 2000)
-      }
-    }
-    const visibility = () => {
-      if (timer) clearTimeout(timer)
-      if (!visible()) abort?.abort()
-      else void refresh()
-    }
-    void refresh()
-    document.addEventListener('visibilitychange', visibility)
-    return () => { active = false; abort?.abort(); if (timer) clearTimeout(timer); document.removeEventListener('visibilitychange', visibility) }
-  }, [sessionId])
+  const [expandedTask, setExpandedTask] = useState<string>()
+  const snapshot = useFusionStatus(sessionId, expandedTask, attentionOnly)
   if (!snapshot || snapshot.sessionId !== sessionId) return attentionOnly ? null : <p style={noteStyle} role="status">{tr(lang, '正在读取 Fusion 状态…', 'Loading Fusion status…')}</p>
   if (snapshot.failed) return attentionOnly ? null : <p style={noteStyle} role="status">{tr(lang, 'Fusion 状态暂时无法更新，恢复连接后会重试。可用 /fusion status 查看。', 'Fusion status cannot update right now; it retries when reconnected. Use /fusion status.')}</p>
   const task = snapshot.status?.task
@@ -86,7 +52,7 @@ export function FusionStatus({ sessionId, attentionOnly = false }: { sessionId: 
     const total = usage.byRole.lead.output.knownTokens + usage.byRole.worker.output.knownTokens
     return total ? tr(lang, ` · 输出占 ${Math.round(usage.byRole[role].output.knownTokens / total * 100)}%`, ` · ${Math.round(usage.byRole[role].output.knownTokens / total * 100)}% of output`) : ''
   }
-  return <details className="fusion-status" key={task.id}>
+  return <details className="fusion-status" key={task.id} onToggle={event => setExpandedTask(event.currentTarget.open ? task.id : undefined)}>
     <style>{styles}</style>
     <summary aria-label={tr(lang, `Fusion · ${stage}，任务详情`, `Fusion · ${stage}, task details`)} data-ud-check="fusion-status-summary">
       <span className="fusion-status-label" role="status">Fusion · {stage}</span>

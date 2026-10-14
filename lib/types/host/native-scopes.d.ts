@@ -13,6 +13,7 @@ export interface FusionScopeCallbacks {
     /** All independent pause, budget, recovery and unknown-effect gates are checked here. */
     canAccess?(agent: Agent, binding: SessionBinding, role: Role): string | undefined;
     /** Shared gates plus limits that apply only to admitting a new generation. */
+    prepareRequest?(agent: Agent, binding: SessionBinding, role: Role, signal: AbortSignal): Promise<void>;
     canRequest(agent: Agent, binding: SessionBinding, role: Role): string | undefined;
     canExecute(exec: Readonly<ToolExecution>, binding: SessionBinding, role: Role): string | undefined;
     beforeRequest(agent: Agent, turn: number, step: number, binding: SessionBinding, role: Role): void;

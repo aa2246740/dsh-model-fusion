@@ -1,6 +1,6 @@
 {
   "name": "dsh-model-fusion",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
@@ -67,7 +67,9 @@
     "typescript": "^5.9.2",
     "vitest": "^4.1.8",
     "@types/react": "~18.3.1",
+    "@types/react-test-renderer": "18.3.1",
     "react": "^18.3.1",
+    "react-test-renderer": "18.3.1",
     "semver": "^7.7.2",
     "yaml": "^2.8.0",
     "@deepseek-ai/cordis": "^4.0.4",

@@ -16,6 +16,7 @@ import type { ResolvedProfile } from '../profile/resolve.js'
 import { appendCapturedReviewResult, persistReviewRequest } from '../review/dispatch.js'
 import { classifyReview } from '../review/protocol.js'
 import { assertCurrentSubject } from '../review/ticket.js'
+import { StatusPending } from '../task/status-index.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import type { TaskState } from '../task/state.js'
 import { BindingRepository } from './bindings.js'
@@ -26,6 +27,7 @@ import { captureNativeReviewRequest, nativeReviewProof } from './native-review.j
 import { NativeFusionScopes } from './native-scopes.js'
 import { NativeContextGuard } from './native-context.js'
 import { NativeModelControl, readModelControl } from './native-model-control.js'
+import { installCompactionRouting } from './compaction-routing.js'
 import { adaptiveWorkflow, enforcedWorkflow, NativeWorkflow } from './native-workflow.js'
 import { NativeRoleSandbox, roleSeparated } from './native-role-sandbox.js'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
@@ -229,6 +231,7 @@ export class FusionCoordinator {
   readonly #leadMutations = new Map<TaskId, symbol>()
   readonly #stoppingTasks = new Map<TaskId, number>()
   readonly #backgroundStops = new Map<TaskId, Promise<void>>()
+  readonly #statusAbort = new AbortController()
   #closing = false
 
   readonly modelControl: NativeModelControl
@@ -265,6 +268,7 @@ export class FusionCoordinator {
       },
       projectMessage: (agent, binding, role, message) => role === 'lead' ? notices.project(agent, binding, message) : message,
       canAccess: (agent, binding, role) => this.#accessBlocked(agent, binding, role),
+      prepareRequest: (_agent, binding, _role, signal) => this.#prepareStatus(binding.taskId, signal),
       canRequest: (agent, binding, role) => this.#requestBlocked(agent, binding, role),
       canExecute: (exec, binding, role) => this.#toolBlocked(exec, binding, role),
       modelLimits: (provider, model) => resolveModelOutputLimits(this.ctx, provider, model),
@@ -358,7 +362,8 @@ export class FusionCoordinator {
       owner: agent => this.owner(agent), allowed: (agent, owner) => {
         const state = this.state(owner.binding.taskId)
         if (digestOf(this.modelControl?.route(owner.binding, owner.role) ?? owner.binding.profile[owner.role]) !== digestOf(owner.binding.profile[owner.role])) return false
-        if (state.control.mode !== 'running' || this.#requestBlocked(agent, owner.binding, owner.role)) return false
+        try { if (state.control.mode !== 'running' || this.#requestBlocked(agent, owner.binding, owner.role)) return false }
+        catch (error) { if (error instanceof StatusPending) return false; throw error }
         if (agent.status === 'running') return true
         if (owner.role !== 'lead') return false
         const childId = state.acceptedChild ?? state.reservedChild
@@ -402,6 +407,10 @@ export class FusionCoordinator {
         && !state.control.recovering && !state.control.outcomeUnknown && !state.control.pendingApprovalIds.length },
       stopAuxiliary: binding => { void this.keepalive.stopTask(binding.taskId, 'provider-unavailable') },
     })
+    this.#dispose.push(installCompactionRouting(ctx, {
+      owner: agent => this.owner(agent), route: (binding, role) => this.modelControl.route(binding, role),
+      epoch: binding => readModelControl(store, binding)?.epoch ?? 0,
+    }))
     this.#dispose.push(ctx.on('tools/result', (exec, result) => {
       const owner = exec.agent && this.owner(exec.agent)
       if (!owner || !enforcedWorkflow(owner.binding)) return
@@ -612,6 +621,20 @@ export class FusionCoordinator {
     return undefined
   }
 
+  async #prepareStatus(taskId: TaskId, signal?: AbortSignal): Promise<void> {
+    const combined = signal ? AbortSignal.any([signal, this.#statusAbort.signal]) : this.#statusAbort.signal
+    await this.store.statusSnapshotAsync(index => index.workerConversations(taskId), combined)
+  }
+
+  async #readyBinding(agent: Agent, role: Role, signal: AbortSignal): Promise<SessionBinding> {
+    for (;;) {
+      const before = this.#binding(agent, role)
+      await this.#prepareStatus(before.taskId, signal)
+      const current = this.#binding(agent, role)
+      if (current.taskId === before.taskId) return current
+    }
+  }
+
   #requestBlocked(agent: Agent, binding: SessionBinding, role: Role): string | undefined {
     const blocked = this.#accessBlocked(agent, binding, role)
     if (blocked) return blocked
@@ -626,8 +649,7 @@ export class FusionCoordinator {
 
   #workerStepLimit(taskId: TaskId, limit = this.state(taskId).currentWorkOrder?.policy.maxWorkerSteps ?? DEFAULT_POLICY.maxWorkerSteps): { requests: number; limit: number } | undefined {
     if (this.bindings.read(this.state(taskId).parent)?.binding.profile.interactionMode === 'model-like') return undefined
-    const rows = this.store.listDocumentIds(`usage:${taskId}:`).map(id => this.store.readDocument(id)!.value as { role?: string; purpose?: string })
-    const requests = rows.filter(row => row.role === 'worker' && (row.purpose === undefined || row.purpose === 'conversation')).length
+    const requests = this.store.statusSnapshot(index => index.workerConversations(taskId), false)
     return requests >= limit ? { requests, limit } : undefined
   }
 
@@ -1039,7 +1061,7 @@ export class FusionCoordinator {
   }
 
   async delegate(agent: Agent, args: DelegateInput, exec: ToolRunContext, mode: 'explore' | 'implement' | 'text' = 'implement'): Promise<string> {
-    const binding = this.#binding(agent, 'lead')
+    const binding = await this.#readyBinding(agent, 'lead', exec.signal)
     const priorState = this.state(binding.taskId)
     const held = this.#held.get(binding.taskId)
     const directHandoff = (mode === 'implement' || binding.profile.interactionMode === 'model-like') && priorState.intent === 'DIRECT' && !priorState.currentWorkOrder
@@ -1277,7 +1299,7 @@ export class FusionCoordinator {
   }
 
   async rework(agent: Agent, feedback: string, exec: ToolRunContext, block = true, checks?: readonly CheckDefinition[], addAllowedPaths?: readonly string[]): Promise<string> {
-    const binding = this.#binding(agent, 'lead'), state = this.state(binding.taskId)
+    const binding = await this.#readyBinding(agent, 'lead', exec.signal), state = this.state(binding.taskId)
     if (!state.acceptedChild || !state.currentWorkOrder) throw new Error('No accepted Worker to continue')
     const childId = state.acceptedChild
     if (!feedback.trim()) throw new Error('Specific Lead-authored feedback is required')
@@ -1312,10 +1334,8 @@ export class FusionCoordinator {
       if (held.holder !== state.acceptedChild || !this.leases.stillHeld(held)) throw new Error('Worker does not own the current writer lease')
     } else if (!['explore', 'text'].includes(state.currentWorkOrder.mode ?? '')) this.#acquire(binding, runtime.root, state.acceptedChild, state.currentWorkOrder.operationId)
     const child = this.ctx.agents.get(NativeSessionId(state.acceptedChild))
-    const liveGeneration = this.store.listDocumentIds(`usage:${binding.taskId}:`).some(id => {
-      const row = this.store.readDocument(id)?.value as { sessionId?: string; purpose?: string; endedAt?: string | null }
-      return row.sessionId === state.acceptedChild && row.purpose === 'conversation' && row.endedAt === null
-    })
+    const workerId = state.acceptedChild
+    const liveGeneration = workerId !== undefined && this.store.statusSnapshot(index => index.hasConversation(binding.taskId, workerId), false)
     const delivery = child?.status !== 'idle' && child
       ? (liveGeneration || this.effects.waitingForJob(child))
         && (!this.effects.pending(binding.taskId).length || this.effects.onlyBackgroundPending(binding.taskId))
@@ -1351,6 +1371,8 @@ export class FusionCoordinator {
   }
 
   async #validate(agent: Agent, binding: SessionBinding, exec: ToolRunContext): Promise<string> {
+    await this.#prepareStatus(binding.taskId, exec.signal)
+    if (this.#binding(agent, 'lead').taskId !== binding.taskId) throw new Error('Fusion task changed during status preparation')
     const runtime = this.#runtime(binding.taskId), state = this.state(binding.taskId), order = state.currentWorkOrder!
     if (!runtime.submitted) {
       const waiting = this.modelControl.waiting(binding, 'worker')
@@ -1795,6 +1817,7 @@ export class FusionCoordinator {
   }
 
   async close(): Promise<void> {
+    this.#statusAbort.abort()
     await this.modelControl.close()
     this.#closing = true
     const auxiliaryStopped = this.keepalive.close()
