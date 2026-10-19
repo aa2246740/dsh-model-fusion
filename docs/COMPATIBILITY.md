@@ -1,8 +1,8 @@
 # DSH compatibility
 
-Fusion supports **DeepSeek Harness 0.2.0-rc.2**. It is an ordinary external plugin: it uses only DSH's public
+Fusion supports **DeepSeek Harness 0.2.1-rc.2**. It is an ordinary external plugin: it uses only DSH's public
 plugin APIs and never patches, replaces or rebuilds DSH itself. `scripts/build.mjs` refuses to build against another
-Host version, and the `peerDependencies` pin the same release.
+Host version, `engines.dsh` declares the supported runtime, and the `peerDependencies` pin the same release.
 
 ## What Fusion depends on
 
@@ -30,6 +30,58 @@ client packages `dsh-client-ui-*` and `dsh-client-store`. Only package entry poi
 Fusion writes only public session events (messages, tool calls and results, and `sandbox/mode` for the Lead's read-only
 sandbox) and stores its own records in its plugin directory.
 
+## Changes from 0.2.0-rc.2 to 0.2.1-rc.2
+
+The subagent seam was renamed and widened; the delegation composition knobs moved. Everything else Fusion imports
+kept its shape — all 25 non-client `@deepseek-ai/*` symbols Fusion imports still exist with unchanged signatures.
+
+| 0.2.0-rc.2 | 0.2.1-rc.2 | Fusion's handling |
+| --- | --- | --- |
+| `ctx.subagents.startContinuable(spec)` | `ctx.subagents.startActivation(spec)` | renamed in `src/host/native-worker.ts` |
+| `ContinuableStartSpec`, `ContinuableStart` | `SubagentActivationSpec`, `SubagentActivation` | spec gained a required `delivery: 'parent' \| 'caller'`; the return gained `result`/`dispose()` and made `messageId` optional |
+| `ctx.subagents.drainContinuableChildren(parent, childIds)` | `ctx.subagents.drainChildren(parent, childIds)` | renamed; `drainDescendants(parents)` is the broader form |
+| `ctx.subagents.start(name, request)` | removed | the benchmark baseline uses `startActivation` with `delivery: 'caller'` |
+| `SubagentRun.localAgent` | removed | the child Agent is read back with `ctx.agents.get(childId)` |
+| `request.persona`, `request.toolFilter` | removed (DSH directs callers to an Agent Preset) | see below |
+| `TerminalBlockLabels` (client) | gained a required `commandLine` | added in `src/client/ActivityRows.tsx` |
+
+`delivery: 'parent'` preserves the 0.2.0 behaviour: the Worker's settlement reaches the Lead's inbox, which is what
+the Lead reconciles from the session log.
+
+**The persona and tool-ceiling knobs have no start-time replacement.** 0.2.1 rejects them outright
+(`tool-subagent: persona is no longer supported; configure persona and tool plugins in an Agent Preset and select it
+with agentPreset`) and `SubagentStartRequest` no longer declares them. The sanctioned replacement is an Agent Preset,
+but Fusion computes the Worker's persona and its tool set per work order at runtime, so a preset cannot express them —
+and requiring a user-configured preset would silently change Fusion's contract. Fusion therefore keeps both inside the
+native role scope it already owns:
+
+- the Worker's persona prompt was already redundant: `NativeFusionScopes` installs the `fusion-role` system-prompt
+  section carrying `binding.prompts[role]` on the child's own context;
+- the Worker's tool ceiling was **not** redundant. In `implement` mode `readOnlyTools` used to return `undefined` and
+  the ceiling came from the start-time `toolFilter` alone. `readOnlyTools` now returns `workerTools` for every Worker
+  mode, so `NativeFusionScopes` narrows the inherited tool set for the child. Its scope is installed at
+  `agent/created`, before the child's first request, and the existing deny-only guard remains the second gate.
+
+That leaves one deliberate behavioural difference to flag: `NativeFusionScopes` pairs a tool restriction with
+`tools.presentAs('native')`, so an `implement`-mode Worker is now presented natively like the read-only modes already
+were. The advertised tool list and the enforced ceiling are unchanged.
+
+### Version declarations
+
+The old version declarations were **not** what blocked 0.2.1, and it is worth being precise about why. DSH evaluates
+plugin requirements with `includePrerelease: true`, and `0.2.1-rc.2` sorts *below* `0.2.1`, so the old
+`>=0.2.0-rc.1 <0.2.1` peer range already satisfied the 0.2.1 gate. What broke was the code.
+
+`engines.dsh: ">=0.2.1-rc.2 <0.3.0-0"` is added anyway, for two reasons: after this port the code genuinely requires
+0.2.1 and would fail on 0.2.0-rc.2, and `engines.dsh` decides alone, so it states that requirement in the one place
+DSH consults first. The peer ranges are widened to the same span because `scripts/link-host.mjs` checks them with
+**plain** semver, where `>=0.2.0-rc.1 <0.2.1` rejects `0.2.1-rc.2`.
+
+| Runtime | Old declarations | New declarations |
+| --- | --- | --- |
+| DSH `0.2.0-rc.2` | accepted | rejected |
+| DSH `0.2.1-rc.2` | accepted (but the code fails) | accepted |
+
 ## Changes from 0.1.5 to 0.1.7 (an example of what an upgrade touches)
 
 - Plugin message sources became `{ kind: 'plugin:<id>' }` (was `{ kind: 'plugin', plugin: '<id>' }`); Fusion declares its
@@ -43,9 +95,14 @@ sandbox) and stores its own records in its plugin directory.
 ## Adapting to a new DSH release (for example 0.1.8)
 
 1. Check out the new Harness release and point `DSHX_HARNESS` at it.
-2. Update the version check in `scripts/build.mjs` and the `@deepseek-ai/*` `peerDependencies`; relink with
-   `node scripts/link-host.mjs <harness>`.
-3. Read the release notes and run `dshx check` for compatibility rules; fix type errors (`pnpm typecheck`).
+2. Update the version check in `scripts/build.mjs`, `engines.dsh` and the `@deepseek-ai/*` `peerDependencies`; relink
+   with `node scripts/link-host.mjs <harness>`. Pick the range carefully: DSH's gate uses `includePrerelease`, where a
+   prerelease sorts below its own release, so a stale upper bound like `<0.2.1` still admits `0.2.1-rc.2` and silently
+   passes — while `scripts/link-host.mjs` uses plain semver and rejects it. Declare the span you actually support
+   (`>=0.2.1-rc.2 <0.3.0-0`) and verify both consumers.
+3. Read the release notes and run `dshx check` for compatibility rules; fix type errors (`pnpm typecheck`). Renames in
+   the subagent seam are not caught by type checking when the old name is simply gone — grep `ctx.subagents` calls by
+   hand, and check the client packages too (`TerminalBlockLabels` gained a required field this time).
 4. Run `pnpm test` and `pnpm test:host` against the new Harness; the Host suite exercises the real Agent, session,
    tool, job, sandbox and subagent services.
 5. Cold-boot the plugin alone in a temporary home: `dshx verify-boot <plugin dir>`.
