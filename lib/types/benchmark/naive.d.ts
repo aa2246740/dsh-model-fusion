@@ -20,7 +20,7 @@ export interface NaiveDelegation {
     disposed: boolean;
     failure: string | null;
 }
-/** Simple sequential coordinator using the native one-shot child lifecycle. */
+/** Simple sequential coordinator using the native single-activation child lifecycle. */
 export declare class NaiveCoordinator {
     #private;
     readonly ctx: Context;

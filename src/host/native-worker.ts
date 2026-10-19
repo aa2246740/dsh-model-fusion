@@ -12,8 +12,6 @@ export interface NativeWorkerRequest {
   /** Model-authored brief from the Lead's native tool call. */
   readonly brief: string
   readonly route: PhysicalRoute
-  readonly persona: string
-  readonly allowedTools: readonly string[]
 }
 
 export interface NativeWorkerAcceptance {
@@ -38,20 +36,28 @@ export class NativeWorkerTransport {
     this.assertAvailable()
     signal.throwIfAborted()
     if (this.ctx.agents.get(SessionId(request.childId))) throw new Error('Reserved Worker already exists; reconcile before retrying')
-    const accepted = await this.ctx.subagents.startContinuable({
+    // 0.2.1 renamed the continuable start and made the result recipient explicit.
+    // `parent` keeps the 0.2.0 behaviour: the child's settlement is delivered to
+    // the Lead's inbox, which this transport then reconciles from the session log.
+    // The Worker's persona prompt and its tool ceiling are NOT start-time inputs
+    // any more (0.2.1 removed `persona`/`toolFilter` from the request and directs
+    // callers to an Agent Preset). Fusion owns both through the native role scope
+    // it installs on the child at `agent/created`, before the child's first
+    // request: the `fusion-role` system-prompt section carries the Worker prompt
+    // and NativeFusionScopes narrows the inherited tool set to `workerTools`.
+    const accepted = await this.ctx.subagents.startActivation({
       provider: this.provider,
       label: request.label,
       childId: SessionId(request.childId),
+      delivery: 'parent',
       request: {
         parent,
         prompt: [{ type: 'text', text: request.brief }],
-        persona: request.persona,
         agentOptions: {
           provider: request.route.provider,
           model: request.route.model,
           ...(request.route.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(request.route.reasoningEffort) }),
         },
-        toolFilter: { allow: [...request.allowedTools] },
         maxDepth: (parent.session.header.delegationDepth ?? 0) + 1,
       },
       signal,
@@ -136,7 +142,8 @@ export class NativeWorkerTransport {
   async release(parent: Agent, childId: string): Promise<void> {
     const child = this.ctx.agents.get(SessionId(childId))
     if (child && child.session.header.parentSession !== parent.id) throw new Error('Cannot release another Lead’s child')
-    await this.ctx.subagents.drainContinuableChildren(parent, [SessionId(childId)])
+    // 0.2.1 renamed this drain; `drainDescendants` is the broader parent-set form.
+    await this.ctx.subagents.drainChildren(parent, [SessionId(childId)])
     if (this.ctx.agents.get(SessionId(childId))) throw new Error('Native Worker release did not prove absence')
   }
 

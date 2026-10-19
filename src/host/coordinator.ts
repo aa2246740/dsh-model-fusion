@@ -288,9 +288,11 @@ export class FusionCoordinator {
         // enforced-v3 keeps its fixed catalog (prompt cache); the guard refuses tools on a completed task.
         if (role === 'lead' && adaptiveWorkflow(binding) && state.control.mode === 'completed' && !roleSeparated(binding)) return []
         if (role === 'worker') {
-          // The native child's capability ceiling is validated in its preset scope.
+          // 0.2.1 removed the start-time `toolFilter`, so every Worker mode is now
+          // narrowed here instead. `agent/created` installs this scope before the
+          // child's first request, and the deny-only guard stays the second gate.
           return state.currentWorkOrder?.mode === 'text' ? [] : state.currentWorkOrder?.mode === 'explore'
-            ? this.options.workerTools.filter(name => READ_TOOLS.has(name)) : undefined
+            ? this.options.workerTools.filter(name => READ_TOOLS.has(name)) : [...this.options.workerTools]
         }
         const lease = this.#held.get(binding.taskId)
         if (roleSeparated(binding)) return this.#leadWriter(binding, agent) ? undefined : this.#separatedLeadTools(state, binding)
@@ -1177,7 +1179,7 @@ export class FusionCoordinator {
       const accepted = binding.workerId
         ? await this.transport.continue(agent, childId, brief, exec.signal)
         : await this.transport.start(agent, { childId, brief, label: args.goal.slice(0, 100),
-          route: this.modelControl.route(binding, 'worker'), persona: binding.prompts.worker, allowedTools: this.options.workerTools }, exec.signal)
+          route: this.modelControl.route(binding, 'worker') }, exec.signal)
       started = true
       this.append(binding.taskId, 'child/accepted', { operationId: order.operationId, child: childId, messageId: accepted.messageId })
       this.store.advanceOutbox(binding.taskId, order.operationId, 'dispatched', 'accepted', { nativeMessageId: accepted.messageId })

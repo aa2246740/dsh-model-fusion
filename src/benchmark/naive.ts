@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { SubagentRun } from '@deepseek-ai/dsh-subagent'
+import type { SubagentActivation } from '@deepseek-ai/dsh-subagent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { PairProfile } from '../contracts.js'
 import { digestOf } from '../digest.js'
@@ -28,7 +28,7 @@ export interface NaiveDelegation {
   failure: string | null
 }
 
-/** Simple sequential coordinator using the native one-shot child lifecycle. */
+/** Simple sequential coordinator using the native single-activation child lifecycle. */
 export class NaiveCoordinator {
   readonly delegations: NaiveDelegation[] = []
   readonly #dispose: (() => void)[] = []
@@ -43,6 +43,17 @@ export class NaiveCoordinator {
     readonly profile: PairProfile, readonly workerMaxTokens: number, readonly tools: readonly string[] = [nativeShellTool]) {
     const provider = ctx.subagents.getProvider('spawn')
     if (!provider || provider.inheritsParentContext !== false) throw new Error('Naive requires a fresh-context native spawn provider')
+    // 0.2.1 removed `persona` and `toolFilter` from the start request and directs
+    // callers to an Agent Preset instead. A benchmark baseline must not depend on
+    // a user-configured preset, so the Worker prompt and the declared tool set are
+    // applied to the child's own scope at `agent/created` — before its first
+    // request, which is the same instant fusion installs its role scope.
+    this.#dispose.push(ctx.on('agent/created', ({ agent }) => {
+      if (agent.session.header.parentSession !== parent.id) return undefined
+      agent.ctx.tools.restrict({ allow: [...this.tools] })
+      agent.ctx.systemPrompt.section({ name: 'naive-benchmark-worker', order: 90, text: naivePrompts.worker })
+      return undefined
+    }))
     this.#dispose.push(parent.ctx.systemPrompt.section({ name: 'naive-benchmark', order: 90, text: naivePrompts.lead }))
     // Deny overlap even if an external caller bypasses the native sibling
     // scheduler. The declared tool remains exclusive under that scheduler.
@@ -90,42 +101,53 @@ export class NaiveCoordinator {
       state: 'starting', stopReason: null, disposed: false, failure: null }
     this.delegations.push(row)
     const key = `naive-delegation:${this.parent.id}:${row.ordinal}`
-    let revision = 0, run: SubagentRun | undefined
+    let revision = 0, activation: SubagentActivation | undefined
     const persist = () => { revision = this.store.writeDocument(key, revision, { ...row }) }
     try {
       persist()
       const route = this.profile.worker
-      run = await this.ctx.subagents.start('spawn', { parent: this.parent, label: `Naive Worker ${row.ordinal}`,
-        prompt: [{ type: 'text', text: brief }], persona: naivePrompts.worker,
+      // `delivery: 'caller'` keeps the 0.2.0 one-shot semantics this baseline
+      // measured: the delegated result returns to the calling tool and is not
+      // pushed into the Lead's inbox as an extra model-visible message.
+      activation = await this.ctx.subagents.startActivation({
+        provider: 'spawn',
+        label: `Naive Worker ${row.ordinal}`,
+        delivery: 'caller',
+        request: {
+          parent: this.parent,
+          prompt: [{ type: 'text', text: brief }],
+          agentOptions: { provider: route.provider, model: route.model,
+            ...(route.reasoningEffort ? { reasoningEffort: ReasoningEffortId(route.reasoningEffort) } : {}),
+            maxTokens: this.workerMaxTokens },
+          maxDepth: (this.parent.session.header.delegationDepth ?? 0) + 1,
+        },
         signal: AbortSignal.any([signal, controller.signal]),
-        agentOptions: { provider: route.provider, model: route.model,
-          ...(route.reasoningEffort ? { reasoningEffort: ReasoningEffortId(route.reasoningEffort) } : {}),
-          maxTokens: this.workerMaxTokens },
-        toolFilter: { allow: [...this.tools] }, maxDepth: (this.parent.session.header.delegationDepth ?? 0) + 1 })
+      })
       // A later validation/journal failure still owns disposal. Observe an
       // infrastructure rejection immediately, before those checks can throw;
       // the normal await below retains the actual rejection as the outcome.
-      void run.result.catch(() => undefined)
-      if (!run.localAgent || run.localAgent.session.header.parentSession !== this.parent.id) throw new Error('Naive requires an owned native child')
-      if (this.delegations.some(other => other !== row && other.childSessionId === run!.id)) throw new Error('Naive child identity was reused')
-      row.childSessionId = run.id
+      void activation.result.catch(() => undefined)
+      const child = this.ctx.agents.get(activation.childId)
+      if (!child || child.session.header.parentSession !== this.parent.id) throw new Error('Naive requires an owned native child')
+      if (this.delegations.some(other => other !== row && other.childSessionId === activation!.childId)) throw new Error('Naive child identity was reused')
+      row.childSessionId = activation.childId
       row.state = 'running'
       persist()
-      const result = await run.result
+      const result = await activation.result
       row.stopReason = result.stopReason
       row.state = 'settled'
       persist()
       if (result.stopReason !== 'completed') throw new Error(`Naive Worker ended ${result.stopReason}; its output is incomplete`)
-      return JSON.stringify({ childSessionId: run.id, stopReason: result.stopReason, output: result.output })
+      return JSON.stringify({ childSessionId: activation.childId, stopReason: result.stopReason, output: result.output })
     } catch (error) {
       row.state = 'failed'
       row.failure = String(error)
       throw error
     } finally {
       try {
-        if (run) {
-          await run.dispose()
-          if (this.ctx.agents.get(run.id)) throw new Error('Naive child remained resident after disposal')
+        if (activation) {
+          await activation.dispose()
+          if (this.ctx.agents.get(activation.childId)) throw new Error('Naive child remained resident after disposal')
           row.disposed = true
         }
         row.endedAt = new Date().toISOString()

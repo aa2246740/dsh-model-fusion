@@ -8,8 +8,6 @@ export interface NativeWorkerRequest {
     /** Model-authored brief from the Lead's native tool call. */
     readonly brief: string;
     readonly route: PhysicalRoute;
-    readonly persona: string;
-    readonly allowedTools: readonly string[];
 }
 export interface NativeWorkerAcceptance {
     readonly childId: string;
