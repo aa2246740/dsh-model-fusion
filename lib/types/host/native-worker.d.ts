@@ -8,7 +8,9 @@ export interface NativeWorkerRequest {
     /** Model-authored brief from the Lead's native tool call. */
     readonly brief: string;
     readonly route: PhysicalRoute;
+    /** 0.2.0 startContinuable persona. 0.2.1 rejects it; the role scope carries the prompt. */
     readonly persona: string;
+    /** 0.2.0 start-time tool ceiling. 0.2.1 rejects toolFilter; the role scope narrows tools. */
     readonly allowedTools: readonly string[];
 }
 export interface NativeWorkerAcceptance {

@@ -6,9 +6,10 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { installModelSelection } from '@deepseek-ai/dsh-agent'
+import { installModelSelection, type Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { hostPlugin } from './host-plugin.js'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as Spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import * as Fork from '@deepseek-ai/dsh-subagent-fork-in-process'
@@ -31,12 +32,23 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
 
+async function drainLeadChildren(ctx: Context, parent: Agent) {
+  const subagents = ctx.subagents as {
+    drainChildren?: (parent: Agent, childIds: readonly SessionId[]) => Promise<void>
+    drainContinuableChildren?: (parent: Agent, childIds: readonly SessionId[]) => Promise<void>
+  }
+  const ids = ctx.agents.list().filter(agent => agent.session.header.parentSession === parent.id).map(agent => agent.id)
+  if (typeof subagents.drainChildren === 'function') await subagents.drainChildren(parent, ids)
+  else if (typeof subagents.drainContinuableChildren === 'function') await subagents.drainContinuableChildren(parent, ids)
+  else throw new Error('Fusion supports DeepSeek Harness 0.2.0-rc.2 and 0.2.1-rc.2; this host has neither subagents.drainChildren nor subagents.drainContinuableChildren')
+}
+
 async function setup(script: ConstructorParameters<typeof MockAdapter>[0]) {
   const root = mkdtempSync(join(tmpdir(), 'fusion-native-worker-'))
   const ctx = new Context()
   cleanups.push(async () => { await ctx.fiber.dispose(); rmSync(root, { recursive: true, force: true }) })
-  await mountAgentLoopTestDependencies(ctx)
-  await ctx.plugin(JsonlSessionPersistence, { root })
+  await mountAgentLoopTestDependencies(ctx, { workingDirectory: true })
+  await ctx.plugin(hostPlugin(JsonlSessionPersistence), { root })
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(TestSessionQuery)
   await ctx.plugin(SubagentRuntime)
@@ -49,8 +61,7 @@ async function setup(script: ConstructorParameters<typeof MockAdapter>[0]) {
   // continuable children this Lead still owns, then dispose the Lead handle.
   cleanups.push(async () => {
     if (ctx.subagents) {
-      await ctx.subagents.drainContinuableChildren(handle.agent,
-        ctx.agents.list().filter(agent => agent.session.header.parentSession === handle.agent.id).map(agent => agent.id))
+      await drainLeadChildren(ctx, handle.agent)
       await handle.dispose()
     }
   })
@@ -73,7 +84,7 @@ async function mountShell(ctx: Context, root: string) {
 describe('native persistent Worker transport', () => {
   it('uses an independent child context and preserves that child on rework', async () => {
     const { parent, adapter, transport } = await setup([textResponse('lead answer'), textResponse('worker first'), textResponse('worker revised')])
-    parent.send(createUserMessage({ content: [{ type: 'text', text: 'PRIVATE LEAD HISTORY' }] }), 'next-turn', true)
+    parent.send(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'PRIVATE LEAD HISTORY' }] }), 'next-turn', true)
     await parent.whenIdle()
     const first = await transport.start(parent, request, freshSignal())
     const child = await transport.settle(parent, first.childId, freshSignal())
@@ -169,15 +180,14 @@ describe('native persistent Worker transport', () => {
     const fresh = new Context()
     cleanups.push(async () => {
       if (fresh.subagents && freshHandle) {
-        await fresh.subagents.drainContinuableChildren(freshHandle.agent,
-          fresh.agents.list().filter(agent => agent.session.header.parentSession === freshHandle.agent.id).map(agent => agent.id))
+        await drainLeadChildren(fresh, freshHandle.agent)
         await freshHandle.dispose()
       }
       await fresh.fiber.dispose()
     })
     let freshHandle: Awaited<ReturnType<typeof fresh.agents.resume>> | undefined
-    await mountAgentLoopTestDependencies(fresh)
-    await fresh.plugin(JsonlSessionPersistence, { root })
+    await mountAgentLoopTestDependencies(fresh, { workingDirectory: true })
+    await fresh.plugin(hostPlugin(JsonlSessionPersistence), { root })
     await fresh.plugin(AgentLoop, { agents: [] })
     await fresh.plugin(TestSessionQuery)
     await fresh.plugin(SubagentRuntime)
@@ -241,9 +251,9 @@ describe('native persistent Worker transport', () => {
     const ordinary = (await ctx.agents.create({ sessionId: SessionId('ordinary'), agentOptions: { provider: 'test-native', model: 'ordinary-model' } })).agent
     expect(ctx.tools.get('fusion_probe', parent)).toBeDefined()
     expect(ctx.tools.get('fusion_probe', ordinary)).toBeUndefined()
-    parent.followup(createUserMessage({ content: [{ type: 'text', text: 'first' }] }))
+    parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'first' }] }))
     await parent.whenIdle()
-    ordinary.followup(createUserMessage({ content: [{ type: 'text', text: 'second' }] }))
+    ordinary.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'second' }] }))
     await ordinary.whenIdle()
     expect(adapter.requests[0].model).toBe('fusion-lead')
     expect(JSON.stringify(adapter.requests[0].messages)).toContain('FUSION LEAD ONLY')
@@ -251,7 +261,7 @@ describe('native persistent Worker transport', () => {
     expect(JSON.stringify(adapter.requests[1].messages)).not.toContain('FUSION LEAD ONLY')
     scopes.detach(parent)
     expect(ctx.tools.get('fusion_probe', parent)).toBeUndefined()
-    parent.followup(createUserMessage({ content: [{ type: 'text', text: 'third' }] }))
+    parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'third' }] }))
     await parent.whenIdle()
     expect(adapter.requests[2].model).toBe('lead')
     expect(frozenCalls).toBe(1)
@@ -288,7 +298,7 @@ describe('native persistent Worker transport', () => {
         return { requestId: proof.ticket.requestId }
       },
     }))
-    parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Review the submitted report' }] }))
+    parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Review the submitted report' }] }))
     await parent.whenIdle()
     const result = parent.session.snapshotEvents().find(event => event.type === 'tool/result')
     if (finish === 'max-tokens') {

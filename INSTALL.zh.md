@@ -2,7 +2,7 @@
 
 [English](INSTALL.md) · 产品介绍：[README.md](README.md)（中文）、[README.en.md](README.en.md)
 
-需要 **DeepSeek Harness 0.2.0-rc.2**，其他版本不支持。
+需要 **DeepSeek Harness 0.2.0-rc.2 或 0.2.1-rc.2**，其他版本不支持。
 
 ## DSH Studio 桌面版（推荐）
 
@@ -20,7 +20,7 @@ dsh-model-fusion@0.2.8
 dsh plugin --profile web add dsh-model-fusion@0.2.8
 ```
 
-`dsh` 不在 PATH 里时：`npx @deepseek-ai/dsh@0.2.0-rc.2 plugin --profile web add dsh-model-fusion@0.2.8`。
+`dsh` 不在 PATH 里时，指定一个受支持的 CLI：`npx @deepseek-ai/dsh@0.2.0-rc.2 plugin --profile web add dsh-model-fusion@0.2.8`，或 `npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web add dsh-model-fusion@0.2.8`。
 这只会写入 `web` 配置。正在运行的 Web 服务需要重新打开一次，再刷新页面。
 
 ## 装好之后

@@ -7,7 +7,8 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { hostPlugin } from './host-plugin.js'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { LocalSandboxProvider } from '@deepseek-ai/dsh-sandbox-local'
 import { SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
@@ -35,7 +36,7 @@ describe.skipIf(process.platform !== 'win32')('Fusion roles over real Windows AC
       // This public testkit includes SessionProjectionRegistry, required by
       // rc.2 SandboxPolicyService before the executor can be registered.
       await mountAgentLoopTestDependencies(ctx)
-      await ctx.plugin(JsonlSessionPersistence, { root: join(root, 'sessions') })
+      await ctx.plugin(hostPlugin(JsonlSessionPersistence), { root: join(root, 'sessions') })
       await ctx.plugin(AgentLoop, { agents: [] })
       await ctx.plugin(LocalSubprocessRuntime)
       await ctx.plugin(ShellEnv, { dshHome: join(root, 'home') })

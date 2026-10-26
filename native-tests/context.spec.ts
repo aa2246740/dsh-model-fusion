@@ -97,7 +97,7 @@ async function setup(script: ConstructorParameters<typeof MockAdapter>[0], optio
     (current, request) => canonical?.assertPresent(current, binding, role, request))
   cleanups.push(async () => { dispose(); disposeUsage(); await ctx.fiber.dispose(); store.close(); rmSync(dir, { recursive: true, force: true }) })
   const send = async (text: string) => {
-    agent.followup(createUserMessage({ content: [{ type: 'text', text }] }))
+    agent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text }] }))
     await agent.whenIdle()
   }
   const usage = () => store.listDocumentIds('usage:').map(id => store.readDocument(id)!.value)
@@ -192,7 +192,7 @@ describe('native final context admission and compaction', () => {
       { compactor, compactorCapacity: 1024 })
     await send('Old background '.repeat(450))
     for await (const _ of ctx.llm.stream({ provider: 'fixture', model: 'lead', purpose: 'compaction', sessionId: agent.id,
-      messages: [createUserMessage({ content: [{ type: 'text', text: 'Summarize only this selected region.' }] })], maxTokens: 512 })) {}
+      messages: [createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Summarize only this selected region.' }] })], maxTokens: 512 })) {}
     expect(adapter.requests).toHaveLength(2)
     expect(adapter.requests[1]).toMatchObject({ provider: 'summary-fixture', maxTokens: 256 })
     expect(reserved()).toMatchObject({ requests: 2, reservedOutputTokens: 768 })
@@ -202,7 +202,7 @@ describe('native final context admission and compaction', () => {
     const { ctx, agent, adapter, blocked, reserved } = await setup([textResponse('Ordinary summary')], { compactor })
     const ordinary = (await ctx.agents.create({ sessionId: SessionId('ordinary-summary'), agentOptions: { provider: 'fixture', model: 'lead' } })).agent
     const envelope = { provider: 'fixture', model: 'lead', purpose: 'compaction' as const,
-      messages: [createUserMessage({ content: [{ type: 'text' as const, text: 'Short summary input' }] })], maxTokens: 512 }
+      messages: [createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text' as const, text: 'Short summary input' }] })], maxTokens: 512 }
     for await (const _ of ctx.llm.stream({ ...envelope, sessionId: ordinary.id })) {}
     expect(adapter.requests).toMatchObject([{ provider: 'fixture', model: 'lead', maxTokens: 512 }])
     const frozen = Object.freeze({ ...envelope, sessionId: agent.id })
@@ -366,7 +366,7 @@ describe('native final context admission and compaction', () => {
   it('counts auxiliary calls tagged by session even outside an initiator scope', async () => {
     const { ctx, agent, adapter, reserved, usage } = await setup([textResponse('Summary')])
     for await (const _chunk of ctx.llm.stream({ provider: 'fixture', model: 'lead', sessionId: agent.id, purpose: 'compaction',
-      messages: [createUserMessage({ content: [{ type: 'text', text: 'Summarize this small input' }] })], maxTokens: 512 })) {}
+      messages: [createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Summarize this small input' }] })], maxTokens: 512 })) {}
     expect(adapter.requests).toHaveLength(1)
     expect(reserved()).toMatchObject({ requests: 1, reservedOutputTokens: 512 })
     expect(usage()).toMatchObject([{ purpose: 'compaction', role: 'lead', actualSubscriptionChargeUsd: null }])
@@ -387,7 +387,7 @@ describe('native final context admission and compaction', () => {
   it('checks the physical window for summaries and keeps title failures out of task control', async () => {
     const { ctx, agent, adapter, blocked, reserved } = await setup([], { capacity: 2048 })
     const stream = (purpose: 'compaction' | 'session-title') => ctx.llm.stream({ provider: 'fixture', model: 'lead', sessionId: agent.id,
-      purpose, messages: [createUserMessage({ content: [{ type: 'text', text: 'Huge input '.repeat(1000) }] })], maxTokens: 512 })
+      purpose, messages: [createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Huge input '.repeat(1000) }] })], maxTokens: 512 })
     for await (const _chunk of stream('session-title')) {}
     expect(blocked).toEqual([])
     for await (const _chunk of stream('compaction')) {}
@@ -402,7 +402,7 @@ describe('native final context admission and compaction', () => {
     expect(adapter.requests).toHaveLength(0)
     expect(blocked[0]).toContain('context window')
     const withCapacity = await setup([])
-    const request = { provider: 'fixture', model: 'lead', maxTokens: 512, messages: [createUserMessage({ content: [{ type: 'text', text: 'Hello' }] })] }
+    const request = { provider: 'fixture', model: 'lead', maxTokens: 512, messages: [createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Hello' }] })] }
     const plain = await withCapacity.guard.measure(withCapacity.agent, { binding: withCapacity.binding, role: 'lead' }, request)
     const large = await withCapacity.guard.measure(withCapacity.agent, { binding: withCapacity.binding, role: 'lead' }, {
       ...request, tools: [{ name: 'large', description: 'Schema description '.repeat(1000), parameters: { type: 'object', properties: {} } }],

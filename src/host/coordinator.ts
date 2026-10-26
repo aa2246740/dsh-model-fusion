@@ -40,6 +40,7 @@ import { observeNativeUsage } from './native-usage.js'
 import { NativeAuxiliaryRequests } from './native-auxiliary.js'
 import { NativeCacheKeepalive } from './native-keepalive.js'
 import type { KeepaliveClock } from './native-keepalive.js'
+import { hasStartActivation } from './subagent-seam.js'
 import { NativeWorkerTransport } from './native-worker.js'
 import { NativeFusionActivity } from './native-activity.js'
 import { captureExploration, citedEvidenceChanged } from './native-exploration.js'
@@ -62,6 +63,7 @@ const READ_TOOLS = new Set(['fusion_read_state', 'glob', 'grep', 'read', 'fusion
 const isRead = (exec: Readonly<ToolExecution>) => READ_TOOLS.has(exec.name)
   || exec.name === 'str_replace_editor' && (exec.arguments as { command?: unknown }).command === 'view'
 const FUSION_TOOLS = new Set(['fusion_read_state', 'fusion_delegate_text', 'fusion_explore', 'fusion_delegate', 'fusion_rework', 'fusion_wait', 'fusion_review_result', 'fusion_submit_result', 'fusion_takeover', 'fusion_finish_direct', 'fusion_read_evidence'])
+const WORKER_FUSION_TOOLS = new Set(['fusion_submit_result', 'fusion_read_state', 'fusion_read_evidence'])
 export interface CoordinatorOptions {
   profile: ResolvedProfile
   workerTools: readonly string[]
@@ -290,9 +292,16 @@ export class FusionCoordinator {
         // enforced-v3 keeps its fixed catalog (prompt cache); the guard refuses tools on a completed task.
         if (role === 'lead' && adaptiveWorkflow(binding) && state.control.mode === 'completed' && !roleSeparated(binding)) return []
         if (role === 'worker') {
-          // The native child's capability ceiling is validated in its preset scope.
-          return state.currentWorkOrder?.mode === 'text' ? [] : state.currentWorkOrder?.mode === 'explore'
-            ? this.options.workerTools.filter(name => READ_TOOLS.has(name)) : undefined
+          if (state.currentWorkOrder?.mode === 'text') return []
+          if (state.currentWorkOrder?.mode === 'explore') return this.options.workerTools.filter(name => READ_TOOLS.has(name))
+          // Implement mode. 0.2.0 keeps `undefined`: `startContinuable` still
+          // sends `toolFilter`, and returning an array here would also call
+          // `presentAs('native')` in NativeFusionScopes. 0.2.1 has no start-time
+          // toolFilter, so the array is the ceiling. The scope is installed at
+          // `agent/created`, before the child's first request, and that array
+          // also presents the Worker natively, as the read-only modes already were.
+          // The deny-only guard stays the second gate on both hosts.
+          return hasStartActivation(this.ctx.subagents) ? [...this.options.workerTools] : undefined
         }
         const lease = this.#held.get(binding.taskId)
         if (roleSeparated(binding)) return this.#leadWriter(binding, agent) ? undefined : this.#separatedLeadTools(state, binding)
@@ -743,10 +752,15 @@ export class FusionCoordinator {
       const problem = workerToolBriefProblem(this.store, binding.taskId, exec, this.#runtime(binding.taskId).briefRevision ?? 0)
       if (problem) return problem
     }
-    if (role === 'worker' && state.currentWorkOrder?.mode === 'text' && !['fusion_submit_result', 'fusion_read_state', 'fusion_read_evidence'].includes(exec.name)) return 'Text delegation has no external tools; prepare the result from the supplied material'
+    if (role === 'worker' && state.currentWorkOrder?.mode === 'text' && !WORKER_FUSION_TOOLS.has(exec.name)) return 'Text delegation has no external tools; prepare the result from the supplied material'
     if (role === 'worker' && state.currentWorkOrder?.mode === 'explore'
       && !isRead(exec) && exec.name !== 'fusion_submit_result') {
       return 'Exploration is read-only: use file search/read tools and fusion_submit_result with source ranges; no shell, edits or run_code'
+    }
+    // The Sidekick's ceiling also holds at execution. A tool another plugin registers on the
+    // Worker itself survives both the 0.2.0 start-time toolFilter and the 0.2.1 scope restriction.
+    if (role === 'worker' && !this.options.workerTools.includes(exec.name) && !WORKER_FUSION_TOOLS.has(exec.name)) {
+      return `${exec.name} is outside the Sidekick's configured tools (${this.options.workerTools.join(', ')})`
     }
     if (binding.profile.interactionMode === 'model-like' && !isRead(exec)) {
       const restore = this.onDemand.blocked(exec.agent, binding)
@@ -1039,7 +1053,14 @@ export class FusionCoordinator {
         return this.#collectAbsentWorker(agent, binding, exec)
       }
       try {
-        await this.#stopJobs(binding.taskId, () => this.transport.stop(agent, childId))
+        // 0.2.1 natural settlement may already have disposed the idle child.
+        // Stopping a handle that is gone throws; the journal still decides
+        // whether the writer can be released.
+        await this.#stopJobs(binding.taskId, async () => {
+          const resident = this.ctx.agents.get(NativeSessionId(childId))
+          if (!resident || resident.session.header.parentSession !== agent.id) return
+          await this.transport.stop(agent, childId)
+        })
         if (this.effects.pending(binding.taskId).length) throw new Error('Worker has unfinished native effects')
         this.#release(binding.taskId)
         if (!this.state(binding.taskId).control.recovering) this.append(binding.taskId, 'task/paused', { reason: String(cause) })
@@ -1889,6 +1910,13 @@ export class FusionCoordinator {
       await parent.whenIdle()
       await this.#backgroundStops.get(binding.taskId)
       const state = this.state(binding.taskId)
+      // 0.2.1 delivers subagent-settled when release disposes the child, and that
+      // wake can run #stopBackground before the replacement scan. Record the
+      // gate while `runtime.background` is still the authority for an in-flight handoff.
+      const background = (this.store.readDocument(`runtime:${binding.taskId}`)?.value as { background?: boolean } | undefined)?.background
+      if (background && state.control.mode !== 'completed' && !state.control.recovering) {
+        this.append(binding.taskId, 'recovery/needed', { reason: 'Host runtime was replaced during a background handoff' })
+      }
       const workerId = binding.workerId ?? state.acceptedChild
       const child = workerId && this.ctx.agents.get(NativeSessionId(workerId))
       await this.#stopJobs(binding.taskId)

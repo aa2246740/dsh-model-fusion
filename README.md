@@ -85,7 +85,7 @@ Lead 等 Sidekick 干活时，可能要等好几分钟。模型的输入缓存�
 
 ## 支持范围
 
-- **DSH 版本：** 只支持 **0.2.0-rc.2**，桌面版和 Web 版都可以。其他版本不保证可用；新版本发布后会另行适配。
+- **DSH 版本：** 支持 **0.2.0-rc.2** 和 **0.2.1-rc.2**，桌面版和 Web 版都可以。其他版本不保证可用；新版本发布后会另行适配。
 - **模型：** DSH 官方自带的模型线路，以及 [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login)、dsh-antigravity-oauth 提供的订阅登录线路。其他第三方模型插件未经测试。
 - **系统：**
   - **macOS：** 已验证（Seatbelt 沙盒）。
@@ -120,7 +120,7 @@ Lead 等 Sidekick 干活时，可能要等好几分钟。模型的输入缓存�
 
 ```sh
 corepack pnpm@9.15.9 install --frozen-lockfile
-node scripts/link-host.mjs /path/to/deepseek-harness-0.2.0-rc.2   # 开发时链接 DSH 源码
+node scripts/link-host.mjs /path/to/deepseek-harness-0.2.0-rc.2   # 或 0.2.1-rc.2；开发时链接 DSH 源码
 DSHX_HARNESS=/path/to/deepseek-harness-0.2.0-rc.2 pnpm build
 pnpm test && DSHX_HARNESS=/path/to/deepseek-harness-0.2.0-rc.2 pnpm test:host
 ```
