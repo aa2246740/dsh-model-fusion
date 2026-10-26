@@ -125,9 +125,10 @@ export class NativeFusionScopes {
       const assembled = await next()
       const route = this.callbacks.route?.(entry.binding, role) ?? entry.binding.profile[role]
       // Another plugin may replace assembled.tools inside next() (dsh-tool-search
-      // swaps in its eager set). Put this role's allowlist and Fusion's own
-      // registrations back from the registry. The deny-only guard still rejects
-      // a hidden local tool that was not restored.
+      // swaps in its eager set). Put this role's permitted tools back from the
+      // registry. Required means "this agent registered it and the role may see
+      // it", so a legacy allowlist that names a model-like-only tool is not a gap.
+      // The deny-only guard still rejects a hidden local tool that was not restored.
       const projected = projectRoleTools({
         assembled: assembled.tools,
         allowlist: readOnlyTools,

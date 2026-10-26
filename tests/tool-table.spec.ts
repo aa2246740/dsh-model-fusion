@@ -23,16 +23,24 @@ describe('Fusion tool table restoration', () => {
     expect(projected.tools.map(item => item.name)).toEqual(['bash', 'edit', 'fusion_submit_result', 'fusion_read_state'])
   })
 
-  it('names Fusion tools that the allowlist requires and the registry no longer has', () => {
+  it('does not require allowlisted Fusion tools this agent never registered', () => {
     const projected = projectRoleTools({
-      assembled: ['bash', 'read'].map(tool),
-      allowlist: ['bash', 'read', 'fusion_delegate', 'fusion_wait'],
-      registry: ['bash', 'read'].map(tool),
+      assembled: ['bash', 'read', 'write', 'edit'].map(tool),
+      allowlist: ['bash', 'read', 'fusion_delegate', 'fusion_read_state', 'fusion_delegate_text', 'fusion_takeover', 'fusion_submit_result'],
+      registry: ['bash', 'read', 'write', 'edit', 'fusion_delegate'].map(tool),
     })
-    expect(projected.tools.map(item => item.name)).toEqual(['bash', 'read'])
-    expect(projected.missing).toEqual(['fusion_delegate', 'fusion_wait'])
-    expect(fusionToolDiagnostic(projected.missing)).toContain('FUSION_TOOL_TABLE_INCOMPLETE')
-    expect(fusionToolDiagnostic(projected.missing)).toContain('do not end the task as completed')
+    expect(projected.missing).toEqual([])
+    expect(projected.tools.map(item => item.name)).toEqual(['bash', 'read', 'fusion_delegate'])
+    for (const name of ['write', 'edit', 'fusion_read_state', 'fusion_delegate_text', 'fusion_takeover', 'fusion_submit_result']) {
+      expect(projected.tools.map(item => item.name)).not.toContain(name)
+    }
+  })
+
+  it('keeps the incomplete-table wording for a gap a caller still reports', () => {
+    const message = fusionToolDiagnostic(['fusion_delegate'])
+    expect(message).toContain('FUSION_TOOL_TABLE_INCOMPLETE')
+    expect(message).toContain('fusion_delegate')
+    expect(message).toContain('do not end the task as completed')
   })
 
   it('does not require Fusion tools when the role\'s allowlist is empty', () => {
@@ -55,5 +63,18 @@ describe('Fusion tool table restoration', () => {
     })
     expect(projected.missing).toEqual([])
     expect(projected.tools.map(item => item.name)).toEqual(['read', 'glob', 'fusion_submit_result', 'fusion_read_state', 'fusion_read_evidence'])
+  })
+
+  it('does not require Worker always-tools this agent never registered', () => {
+    const projected = projectRoleTools({
+      assembled: ['read', 'write'].map(tool),
+      allowlist: ['read', 'glob', 'grep', 'fusion_read_state'],
+      registry: ['read', 'glob', 'write', 'fusion_read_evidence', 'fusion_submit_result'].map(tool),
+      always: ['fusion_read_state', 'fusion_read_evidence', 'fusion_submit_result'],
+    })
+    expect(projected.missing).toEqual([])
+    expect(projected.tools.map(item => item.name)).toEqual(['read', 'glob', 'fusion_read_evidence', 'fusion_submit_result'])
+    expect(projected.tools.map(item => item.name)).not.toContain('fusion_read_state')
+    expect(projected.tools.map(item => item.name)).not.toContain('write')
   })
 })

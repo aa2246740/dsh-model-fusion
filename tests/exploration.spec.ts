@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -90,5 +91,47 @@ describe('source-backed exploration evidence', () => {
     expect(reduceAll(events)).toMatchObject({ phase: 'PLANNING', verification: 'unverified', control: { mode: 'running' } })
     expect(() => reduceAll([...events, envelope('task/completed', 6, { snapshot: snapshot.id, verification: 'verified' })])).toThrow()
     expect(() => reduceAll([...events.slice(0, 4), envelope('exploration/recorded', 5, { report: { ...report, revision: 2 } })])).toThrow()
+  })
+
+  it.each(['blocked', 'needs-decision'] as const)('records a %s report when the whole-tree snapshot failed', status => {
+    const { store, snapshot, work } = fixture()
+    const report = captureExploration(store, work, snapshot, undefined, { status, summary: 'The tree could not be listed.', unresolved: ['Need a decision'] }, [], 'Unsupported source file type: unrelated.pipe')
+    expect(report.status).toBe(status)
+    expect(report.snapshot).toBe(snapshot.id)
+    expect(report.sources).toEqual([])
+    expect(report.unresolved.join('\n')).toContain('Unsupported source file type: unrelated.pipe')
+    expect(report.unresolved.join('\n')).toContain('not acceptance')
+  })
+
+  it('accepts a completed report from cited files when the whole-tree snapshot failed elsewhere', () => {
+    const { store, snapshot, work, submitted } = fixture()
+    const report = captureExploration(store, work, snapshot, undefined, submitted, [{ path: 'a.ts', startLine: 1, endLine: 2 }], 'Unsupported source file type: unrelated.pipe')
+    expect(report.status).toBe('completed')
+    expect(report.snapshot).toBe(snapshot.id)
+    expect(report.unresolved).toEqual([])
+    expect(Buffer.from(store.readArtifact(TASK, report.sources[0]!.excerpt.id)).toString()).toContain('return a - b')
+  })
+
+  it.each([
+    { label: 'changed', apply: (root: string) => writeFileSync(join(root, 'a.ts'), 'changed\n'), message: 'changed during capture' },
+    { label: 'deleted', apply: (root: string) => rmSync(join(root, 'a.ts')), message: 'Exploration source is missing' },
+    { label: 'replaced with a symlink', apply: (root: string) => { rmSync(join(root, 'a.ts')); writeFileSync(join(root, 'copy.ts'), 'export function add(a, b) {\n  return a - b\n}\n'); symlinkSync('copy.ts', join(root, 'a.ts')) }, message: 'symlink' },
+  ])('rejects a completed report whose cited file was $label even if the tree snapshot already failed', ({ apply, message }) => {
+    const { root, store, snapshot, work, submitted } = fixture()
+    apply(root)
+    expect(() => captureExploration(store, work, snapshot, undefined, submitted, [{ path: 'a.ts', startLine: 1, endLine: 2 }], 'Unsupported source file type: unrelated.pipe')).toThrow(message)
+    expect(store.artifacts(TASK)).toEqual([])
+  })
+
+  it.skipIf(process.platform === 'win32')('records a blocked report after an unrelated FIFO makes snapshotWorkspace throw', () => {
+    const { root, store, snapshot, work } = fixture()
+    execFileSync('mkfifo', [join(root, 'unrelated.pipe')])
+    expect(() => snapshotWorkspace(root)).toThrow('Unsupported source file type: unrelated.pipe')
+    let failure = ''
+    try { snapshotWorkspace(root) } catch (error) { failure = error instanceof Error ? error.message : String(error) }
+    const report = captureExploration(store, work, snapshot, undefined, { status: 'blocked', summary: 'Cannot list the tree.', unresolved: ['Need a decision'] }, [], failure)
+    expect(report.status).toBe('blocked')
+    expect(report.unresolved.join('\n')).toContain('unrelated.pipe')
+    expect(report.snapshot).toBe(snapshot.id)
   })
 })

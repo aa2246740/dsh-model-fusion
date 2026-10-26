@@ -10,10 +10,19 @@ export interface ProjectedTools<T extends NamedTool> {
 /**
  * Rebuild one role's request tool table after another plugin replaces `assembled.tools`.
  *
- * The allowlist is applied as a filter, then missing names are copied back from this
+ * The allowlist is a capability ceiling, not a list of mandatory registrations.
+ * It filters the assembled table, then permitted names are copied back from this
  * agent's own registry: allowlisted tools (such as `job_output`) and Fusion's own
  * `fusion_*` registrations. An undefined allowlist keeps the assembled table and only
  * unions Fusion's registrations, so a writing role is not narrowed.
+ *
+ * A Fusion tool is required only when this agent actually registered it and the role
+ * may see it. `fusion_read_state` and `fusion_delegate_text` are registered only for
+ * model-like profiles; a legacy allowlist that merely names them is not incomplete.
+ * Restore copies every permitted registry tool before the gap is measured, so `missing`
+ * stays empty for every table this function itself builds. The field remains so a later
+ * change that stops restoring a registered tool fails closed instead of sending a
+ * silently smaller catalog.
  */
 export declare function projectRoleTools<T extends NamedTool>(input: {
     assembled: readonly T[];

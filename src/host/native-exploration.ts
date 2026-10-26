@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { lstatSync, readFileSync } from 'node:fs'
 import type { ExplorationReport, ExplorationSource, WorkOrder } from '../contracts.js'
 import { sha256Hex } from '../digest.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
@@ -25,6 +25,14 @@ function prepareSources(baseline: WorkspaceSnapshot, sources: readonly Explorati
       || source.startLine < 1 || source.endLine < source.startLine || source.endLine - source.startLine >= 80) {
       throw new Error('Exploration source ranges require 1–80 lines each')
     }
+    let stat
+    try { stat = lstatSync(path) }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('Exploration source is missing')
+      throw error
+    }
+    // A FIFO or socket is not source text. Reject it before readFileSync, which would block on a pipe.
+    if (!stat.isFile()) throw new Error(`Unsupported source file type: ${source.path}`)
     const bytes = readFileSync(path)
     if (sha256Hex(bytes) !== entry.digest) throw new Error('Exploration source changed during capture')
     const content = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
@@ -46,20 +54,28 @@ function storeSources(store: SqliteFusionStore, taskId: WorkOrder['taskId'], pre
 /**
  * Source-backed handoff. Completed reports are checked against the files they cite,
  * not against every other file in a non-git root. blocked and needs-decision reports
- * are always recorded, with the drift named, and are not acceptance.
+ * are always recorded, with drift or a failed whole-tree snapshot named, and are not acceptance.
+ *
+ * `current` is omitted when snapshotting the tree threw. The failure is stored on a
+ * non-completed report. A completed report ignores that unrelated failure and still
+ * stands or falls on the cited files alone.
  */
-export function captureExploration(store: SqliteFusionStore, order: WorkOrder, baseline: WorkspaceSnapshot, current: WorkspaceSnapshot,
-  submitted: Pick<ExplorationReport, 'summary' | 'status' | 'unresolved'>, sources: readonly ExplorationSource[]): ExplorationReport {
-  if (order.mode !== 'explore' || baseline.id !== order.baseSnapshot || baseline.root !== current.root) {
+export function captureExploration(store: SqliteFusionStore, order: WorkOrder, baseline: WorkspaceSnapshot, current: WorkspaceSnapshot | undefined,
+  submitted: Pick<ExplorationReport, 'summary' | 'status' | 'unresolved'>, sources: readonly ExplorationSource[], snapshotFailure?: string): ExplorationReport {
+  if (order.mode !== 'explore' || baseline.id !== order.baseSnapshot || (current !== undefined && baseline.root !== current.root)) {
     throw new Error('Exploration capture requires the frozen explore baseline')
   }
-  const drifted = baseline.id !== current.id
-  const changed = drifted ? changedPaths(baseline, current) : []
-  const driftDetail = drifted
+  if (current === undefined && !snapshotFailure) throw new Error('Exploration capture requires a current snapshot or a recorded snapshot failure')
+  const drifted = current !== undefined && baseline.id !== current.id
+  const changed = drifted && current ? changedPaths(baseline, current) : []
+  const driftDetail = drifted && current
     ? `Exploration workspace changed since frozen baseline ${baseline.id}; current snapshot ${current.id}; changed paths: ${formatChanged(changed)}. This is not acceptance. A completed report can cite only files that still match the baseline; blocked or needs-decision records this drift.`
     : undefined
+  const snapshotDetail = current === undefined
+    ? `Workspace snapshot failed: ${snapshotFailure}. Frozen baseline ${baseline.id}. This is not acceptance. The report is recorded so the blocker is not dropped; a completed report can cite only files that still match that baseline.`
+    : undefined
   if (submitted.status !== 'completed') {
-    const problems = driftDetail ? [driftDetail] : []
+    const problems = [driftDetail, snapshotDetail].filter((item): item is string => item !== undefined)
     let prepared: PreparedSource[] = []
     if (sources.length) {
       try { prepared = prepareSources(baseline, sources) }
@@ -70,7 +86,7 @@ export function captureExploration(store: SqliteFusionStore, order: WorkOrder, b
       sources: storeSources(store, order.taskId, prepared) }
   }
   if (!sources.length || sources.length > 12) throw new Error('A completed exploration requires 1–12 source ranges')
-  if (drifted) {
+  if (drifted && current) {
     const cited = new Set(sources.map(source => source.path))
     const citedChanged = changed.filter(path => cited.has(path))
     if (citedChanged.length) {
@@ -88,7 +104,9 @@ export function citedEvidenceChanged(root: string, baseline: WorkspaceSnapshot, 
     const entry = baseline.entries.find(item => item.path === source.path && item.kind === 'file')
     if (!entry || entry.digest !== source.fileDigest) return source.path
     try {
-      const bytes = readFileSync(workspacePath(root, source.path))
+      const path = workspacePath(root, source.path)
+      if (!lstatSync(path).isFile()) return source.path
+      const bytes = readFileSync(path)
       if (sha256Hex(bytes) !== source.fileDigest) return source.path
     } catch { return source.path }
   }

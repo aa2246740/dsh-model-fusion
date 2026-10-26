@@ -10,10 +10,19 @@ export interface ProjectedTools<T extends NamedTool> {
 /**
  * Rebuild one role's request tool table after another plugin replaces `assembled.tools`.
  *
- * The allowlist is applied as a filter, then missing names are copied back from this
+ * The allowlist is a capability ceiling, not a list of mandatory registrations.
+ * It filters the assembled table, then permitted names are copied back from this
  * agent's own registry: allowlisted tools (such as `job_output`) and Fusion's own
  * `fusion_*` registrations. An undefined allowlist keeps the assembled table and only
  * unions Fusion's registrations, so a writing role is not narrowed.
+ *
+ * A Fusion tool is required only when this agent actually registered it and the role
+ * may see it. `fusion_read_state` and `fusion_delegate_text` are registered only for
+ * model-like profiles; a legacy allowlist that merely names them is not incomplete.
+ * Restore copies every permitted registry tool before the gap is measured, so `missing`
+ * stays empty for every table this function itself builds. The field remains so a later
+ * change that stops restoring a registered tool fails closed instead of sending a
+ * silently smaller catalog.
  */
 export function projectRoleTools<T extends NamedTool>(input: {
   assembled: readonly T[]
@@ -27,6 +36,7 @@ export function projectRoleTools<T extends NamedTool>(input: {
   const tools = input.allowlist === undefined ? [...input.assembled] : input.assembled.filter(tool => permitted(tool.name))
   const present = new Set(tools.map(tool => tool.name))
   const owned = input.registry.filter(tool => tool.name.startsWith('fusion_'))
+  const registered = new Set(input.registry.map(tool => tool.name))
   const restore = input.allowlist === undefined
     ? owned
     : input.registry.filter(tool => permitted(tool.name))
@@ -35,9 +45,9 @@ export function projectRoleTools<T extends NamedTool>(input: {
     tools.push(tool)
     present.add(tool.name)
   }
-  const required = (input.allowlist === undefined ? owned.map(tool => tool.name) : [...input.allowlist, ...always])
-    .filter(name => name.startsWith('fusion_'))
-  return { tools, missing: [...new Set(required)].filter(name => !present.has(name)) }
+  const candidates = input.allowlist === undefined ? owned.map(tool => tool.name) : [...input.allowlist, ...always]
+  const required = [...new Set(candidates)].filter(name => name.startsWith('fusion_') && registered.has(name))
+  return { tools, missing: required.filter(name => !present.has(name)) }
 }
 
 /** Shown when the role's Fusion tools cannot be restored. The request must not proceed as a normal completion. */

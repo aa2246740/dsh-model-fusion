@@ -1436,7 +1436,6 @@ export class FusionCoordinator {
           ? 'No further Worker request can be admitted. Do not retry fusion_rework or claim completion. Explain the incomplete work and await a user decision; existing files and evidence are retained. This is not a provider outage or quota limit.'
           : 'Worker stopped without fusion_submit_result; its turn is incomplete. This is WORKFLOW_INCOMPLETE, not a provider outage or quota limit. Do not describe the Sidekick as unavailable.' })
     }
-    const candidate = this.#candidate(runtime)
     if (order.mode === 'explore') {
       const report = runtime.explorationSubmitted
       if (!report || report.workOrderId !== order.id || report.snapshot !== order.baseSnapshot) {
@@ -1461,6 +1460,8 @@ export class FusionCoordinator {
           ? 'Use these source findings to make your own plan, then fusion_delegate to this same Worker. For missing facts use fusion_rework; for a read-only question use fusion_finish_direct. Exploration does not complete implementation.'
           : 'Exploration did not finish. If specific feedback can resolve the blocker, use fusion_rework with the same Worker. Otherwise explain the blocker and end this turn to await the missing input. No Worker is still running; fusion_wait will not retry it. Do not call fusion_finish_direct, fusion_review_result or fusion_delegate on this incomplete report.' })
     }
+    // Exploration already returned. Implementation and text reports still need a fresh tree snapshot.
+    const candidate = this.#candidate(runtime)
     const changes = changedPaths(runtime.base, candidate)
     const outside = changes.filter(path => !pathAllowed(path, order.allowedPaths))
     if (outside.length) return JSON.stringify({ status: 'rework-required', reason: 'Changes outside frozen allowedPaths', paths: outside })
@@ -1737,8 +1738,17 @@ export class FusionCoordinator {
           if (args.summary.length > 16_000 || args.unresolved.length > 30) throw new Error('Worker report is too large')
           const submitted = { summary: args.summary, unresolved: args.unresolved, status: args.status }
           const order = this.state(binding.taskId).currentWorkOrder!
+          // A whole-tree snapshot can throw on an unrelated FIFO or socket. That must not
+          // drop a blocked or needs-decision report, and a completed report is decided
+          // only by the files it cites.
+          let current: WorkspaceSnapshot | undefined
+          let snapshotFailure: string | undefined
+          if (order.mode === 'explore') {
+            try { current = snapshotWorkspace(runtime.root) }
+            catch (error) { snapshotFailure = error instanceof Error ? error.message : String(error) }
+          }
           const explorationSubmitted = order.mode === 'explore'
-            ? captureExploration(this.store, order, runtime.base, snapshotWorkspace(runtime.root), submitted, args.sources ?? []) : undefined
+            ? captureExploration(this.store, order, runtime.base, current, submitted, args.sources ?? [], snapshotFailure) : undefined
           this.#saveRuntime({ ...runtime, submitted, explorationSubmitted })
           if (role === 'lead') { this.#release(binding.taskId); return this.#validate(agent, binding, exec) }
           exec.concludeTurn()
