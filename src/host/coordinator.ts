@@ -42,7 +42,9 @@ import { NativeCacheKeepalive } from './native-keepalive.js'
 import type { KeepaliveClock } from './native-keepalive.js'
 import { NativeWorkerTransport } from './native-worker.js'
 import { NativeFusionActivity } from './native-activity.js'
-import { captureExploration } from './native-exploration.js'
+import { captureExploration, citedEvidenceChanged } from './native-exploration.js'
+import { workspaceWriterDenial } from './workspace-guard.js'
+import { absentWorkerOutcome, workerStopExplanation } from './worker-terminal.js'
 import { resolveModelOutputLimits } from './model-output.js'
 import { assertWorkerBriefRequest, captureWorkerBrief, workerToolBriefProblem } from './native-worker-brief.js'
 import { changedPaths, pathAllowed, snapshotWorkspace, workspacePath, workspaceRelative } from './workspace.js'
@@ -345,17 +347,18 @@ export class FusionCoordinator {
     this.#dispose.push(ctx.tools.guard(exec => {
       if (!exec.agent) return undefined
       const owner = this.owner(exec.agent)
-      if (owner) {
-        try { this.scopes.assertReady(exec.agent) } catch (error) { return String(error) }
-      }
-      if (!isRead(exec) && !FUSION_TOOLS.has(exec.name) && exec.name !== 'run_code') {
-        const cwd = exec.agent.session.header.cwd
-        if (cwd) {
-          const lease = this.leases.current(cwd)
-          if (lease && lease.holder !== SessionId(exec.agent.id)) return `Workspace writer is ${lease.holder}; this Agent is read-only`
-        }
-      }
-      return undefined
+      // The lease governs Fusion's own Lead and Worker only. Another session in
+      // the same directory is not made read-only by a Fusion writer.
+      if (!owner) return undefined
+      try { this.scopes.assertReady(exec.agent) } catch (error) { return String(error) }
+      const cwd = exec.agent.session.header.cwd
+      return workspaceWriterDenial({
+        fusionOwned: true,
+        exempt: isRead(exec) || FUSION_TOOLS.has(exec.name) || exec.name === 'run_code',
+        cwd,
+        leaseHolder: cwd ? this.leases.current(cwd)?.holder : undefined,
+        agentId: SessionId(exec.agent.id),
+      })
     }))
     this.cachePolicy = new CachePolicy(store)
     this.keepalive = new NativeCacheKeepalive(ctx, store, this.#auxiliary, {
@@ -994,10 +997,29 @@ export class FusionCoordinator {
         : 'The Worker retains write ownership. Continue read-only work, use fusion_rework to steer the same Worker, or call fusion_wait for its report and native checks.' })
   }
 
+  /** A disposed Worker is a terminal persisted state, not an unknown side effect, when nothing is still running. */
+  async #collectAbsentWorker(agent: Agent, binding: SessionBinding, exec: ToolRunContext): Promise<string> {
+    const outcome = absentWorkerOutcome({
+      pendingEffects: this.effects.pending(binding.taskId).length,
+      outcomeUnknown: this.state(binding.taskId).control.outcomeUnknown,
+      submitted: Boolean(this.#runtime(binding.taskId).submitted),
+    })
+    if (outcome.kind === 'recovery') {
+      this.#trackingFailed(agent, `Worker wait requires recovery: ${outcome.reason}`)
+      throw new Error(outcome.reason)
+    }
+    this.#release(binding.taskId)
+    exec.signal.throwIfAborted()
+    this.scopes.assertReady(agent)
+    return this.#validate(agent, binding, exec)
+  }
+
   async #waitWorker(agent: Agent, binding: SessionBinding, exec: ToolRunContext): Promise<string> {
     const childId = this.state(binding.taskId).acceptedChild
     if (!childId) throw new Error('No accepted Worker to wait for')
     this.#saveRuntime({ ...this.#runtime(binding.taskId), background: false })
+    const resident = this.ctx.agents.get(NativeSessionId(childId))
+    if (!resident || resident.session.header.parentSession !== agent.id) return this.#collectAbsentWorker(agent, binding, exec)
     try {
       const settled = await this.transport.settle(agent, childId, exec.signal, true)
       if (!settled) {
@@ -1012,6 +1034,10 @@ export class FusionCoordinator {
       exec.signal.throwIfAborted()
     } catch (error) {
       const cause = exec.signal.aborted ? new Error('FUSION_INTERRUPTED: the native turn was cancelled; progress is retained. Continue the existing task after its effects settle.') : error
+      const gone = this.ctx.agents.get(NativeSessionId(childId))
+      if (!exec.signal.aborted && (!gone || gone.session.header.parentSession !== agent.id)) {
+        return this.#collectAbsentWorker(agent, binding, exec)
+      }
       try {
         await this.#stopJobs(binding.taskId, () => this.transport.stop(agent, childId))
         if (this.effects.pending(binding.taskId).length) throw new Error('Worker has unfinished native effects')
@@ -1077,11 +1103,16 @@ export class FusionCoordinator {
       ? { schemaVersion: 1, root: `text:${binding.sessionId}`, entries: [], excludedDirectoryNames: [], id: SnapshotId(`text:${binding.taskId}`) }
       : snapshotWorkspace(agent.session.header.cwd!)
     const explored = promoting && priorState.phase === 'PLANNING' && priorState.exploration?.workOrderId === priorState.currentWorkOrder!.id
-      && priorState.exploration.status === 'completed' && priorState.exploration.snapshot === base.id
+      && priorState.exploration.status === 'completed' && priorState.exploration.snapshot === priorState.currentWorkOrder!.baseSnapshot
+      && !citedEvidenceChanged(base.root, this.#runtime(binding.taskId).base, priorState.exploration)
     // v3: the Lead cannot fall back to doing the work itself, so an exploration that did not complete
     // (Worker stopped, blocked or unavailable) must not dead-end the task: implementation may replace it
     // once the Worker is quiescent, i.e. its write lease is released (study 2026-09-25: six explore-first attempts never reached a Worker).
     const abandoned = promoting && !explored && roleSeparated(binding) && !priorState.lease
+    if (promoting && priorState.exploration?.status === 'completed' && !priorState.lease) {
+      const cited = citedEvidenceChanged(base.root, this.#runtime(binding.taskId).base, priorState.exploration)
+      if (cited) throw new Error(`Cited exploration evidence changed: ${cited}. Frozen baseline ${priorState.currentWorkOrder!.baseSnapshot}. Unrelated files do not block a completed report; cite files that still match, or submit blocked or needs-decision to record the drift.`)
+    }
     if (promoting && ((!explored && !abandoned) || priorState.lease || this.effects.pending(binding.taskId).length)) {
       throw new Error('Wait for the completed read-only exploration on the unchanged workspace before sending an implementation plan')
     }
@@ -1376,10 +1407,14 @@ export class FusionCoordinator {
     const runtime = this.#runtime(binding.taskId), state = this.state(binding.taskId), order = state.currentWorkOrder!
     if (!runtime.submitted) {
       const waiting = this.modelControl.waiting(binding, 'worker')
-      if (waiting) return JSON.stringify({ status: 'needs-decision', reasonCode: 'worker-unavailable', failureCode: waiting.code,
-        childId: state.acceptedChild, workerRunning: false, quotaResetAt: waiting.quotaResetAt,
-        ...(waiting.retryNotBefore ? { retryNotBefore: waiting.retryNotBefore } : {}),
-        next: 'Explain which role is unavailable. Use local Fusion controls to continue or replace its model; do not retry delegation or take over automatically.' })
+      if (waiting) {
+        const explanation = workerStopExplanation(waiting.code)
+        return JSON.stringify({ status: 'needs-decision', reasonCode: explanation.reasonCode, failureCode: waiting.code,
+          childId: state.acceptedChild, workerRunning: false, quotaResetAt: waiting.quotaResetAt,
+          ...(waiting.retryNotBefore ? { retryNotBefore: waiting.retryNotBefore } : {}),
+          ...(waiting.code === 'WORKFLOW_INCOMPLETE' ? { reason: 'worker ended without submitting a report' } : {}),
+          next: explanation.next })
+      }
       const failure = runtime.workerFailure
       if (failure?.workOrderId === order.id && failure.childId === state.acceptedChild) {
         const quota = failure.category === 'quota-exhausted'
@@ -1392,15 +1427,24 @@ export class FusionCoordinator {
       }
       const spent = this.#workerStepLimit(binding.taskId)
       if (spent) this.#recordWorkerStepStop(binding.taskId, spent)
-      return JSON.stringify({ status: 'needs-decision', reason: 'Worker stopped without fusion_submit_result; its turn is incomplete', childId: state.acceptedChild,
-        ...(spent ? { reasonCode: 'worker-step-limit', workerRunning: false, ...spent,
-          next: 'No further Worker request can be admitted. Do not retry fusion_rework or claim completion. Explain the incomplete work and await a user decision; existing files and evidence are retained.' } : {}) })
+      return JSON.stringify({ status: 'needs-decision', reason: 'worker ended without submitting a report',
+        reasonCode: spent ? 'worker-step-limit' : 'workflow-incomplete',
+        failureCode: spent ? 'worker-step-limit' : 'WORKFLOW_INCOMPLETE',
+        childId: state.acceptedChild, workerRunning: false,
+        ...(spent ? spent : {}),
+        next: spent
+          ? 'No further Worker request can be admitted. Do not retry fusion_rework or claim completion. Explain the incomplete work and await a user decision; existing files and evidence are retained. This is not a provider outage or quota limit.'
+          : 'Worker stopped without fusion_submit_result; its turn is incomplete. This is WORKFLOW_INCOMPLETE, not a provider outage or quota limit. Do not describe the Sidekick as unavailable.' })
     }
     const candidate = this.#candidate(runtime)
     if (order.mode === 'explore') {
       const report = runtime.explorationSubmitted
-      if (!report || report.workOrderId !== order.id || report.snapshot !== candidate.id) {
-        throw new Error('Exploration report or workspace changed; inspect before continuing')
+      if (!report || report.workOrderId !== order.id || report.snapshot !== order.baseSnapshot) {
+        throw new Error('Exploration report is missing or is not bound to the frozen baseline')
+      }
+      if (report.status === 'completed') {
+        const cited = citedEvidenceChanged(runtime.root, runtime.base, report)
+        if (cited) throw new Error(`Cited exploration evidence changed: ${cited}. Frozen baseline ${order.baseSnapshot}. Submit blocked or needs-decision to record the drift.`)
       }
       this.store.transact(binding.taskId, state.seq, persisted => ({
         events: [{ schemaVersion: 1, id: randomUUID(), taskId: binding.taskId, seq: state.seq + 1,
@@ -1694,7 +1738,7 @@ export class FusionCoordinator {
           const submitted = { summary: args.summary, unresolved: args.unresolved, status: args.status }
           const order = this.state(binding.taskId).currentWorkOrder!
           const explorationSubmitted = order.mode === 'explore'
-            ? captureExploration(this.store, order, snapshotWorkspace(runtime.root), submitted, args.sources ?? []) : undefined
+            ? captureExploration(this.store, order, runtime.base, snapshotWorkspace(runtime.root), submitted, args.sources ?? []) : undefined
           this.#saveRuntime({ ...runtime, submitted, explorationSubmitted })
           if (role === 'lead') { this.#release(binding.taskId); return this.#validate(agent, binding, exec) }
           exec.concludeTurn()
@@ -1761,7 +1805,9 @@ export class FusionCoordinator {
         if (this.effects.pending(binding.taskId).length) throw new Error('Collect or stop every native job before completing the direct task')
         const snapshot = snapshotWorkspace(this.#runtime(binding.taskId).root)
         if (explored) {
-          if (snapshot.id !== state.exploration!.snapshot || state.lease) throw new Error('Read-only exploration workspace changed')
+          if (state.lease) throw new Error('Read-only exploration still holds a write lease')
+          const cited = citedEvidenceChanged(this.#runtime(binding.taskId).root, this.#runtime(binding.taskId).base, state.exploration!)
+          if (cited) throw new Error(`Cited exploration evidence changed: ${cited}. Frozen baseline ${state.exploration!.snapshot}.`)
           this.append(binding.taskId, 'intent/chosen', { intent: 'DIRECT' })
         }
         this.#release(binding.taskId)
