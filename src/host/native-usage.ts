@@ -13,12 +13,21 @@ import type { NativeAuxiliaryRequests } from './native-auxiliary.js'
 
 export interface UsageOwner { readonly taskId: TaskId; readonly role: Role }
 
-/** DSH counters are disjoint; missing provider fields retain unknown applicability. */
+/**
+ * DSH counters are disjoint; missing provider fields retain unknown applicability.
+ *
+ * A counter is known only when the provider reported a real finite number.
+ * Gateways that omit completion_tokens_details send reasoningTokens as null
+ * (seen on some claude-opus-5.5 routes). known(null) throws INVALID_TOKEN_COUNT
+ * inside the llm/stream hook and aborts the turn, so null and NaN stay unknown.
+ */
 export function billFromNativeUsage(usage: TokenUsage | undefined): CanonicalBill {
-  const count = (value: number | undefined) => value === undefined ? unknown() : known(value)
+  const count = (value: number | undefined | null) =>
+    value === undefined || value === null || !Number.isFinite(value) ? unknown() : known(value)
   return {
     uncachedInput: count(usage?.inputTokens), cacheRead: count(usage?.cacheReadTokens), output: count(usage?.outputTokens),
-    cacheWrite: usage?.cacheWriteTokens === undefined ? { kind: 'unknown' }
+    cacheWrite: usage?.cacheWriteTokens === undefined || usage.cacheWriteTokens === null
+      || !Number.isFinite(usage.cacheWriteTokens) ? { kind: 'unknown' }
       : { kind: 'aggregate', rateKey: 'provider-cache-write-rate-unknown', tokens: known(usage.cacheWriteTokens) },
     reasoning: { kind: 'unknown', tokens: count(usage?.reasoningTokens) },
   }
