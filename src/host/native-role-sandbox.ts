@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { SessionId as NativeSessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { Role } from '../contracts.js'
@@ -90,6 +91,19 @@ export class NativeRoleSandbox {
     if (policy.overrideOf(agent.session) !== intent.mode) this.#set(agent.session, intent.mode, { ...intent, ownSeqs: [] })
   }
 
+  /** Apply the user's mode to a resident Sidekick immediately. The next request still re-checks through ensure(). */
+  #pushSidekickMode(taskId: SessionBinding['taskId'], mode: Mode): void {
+    const policy = this.#policy
+    if (!policy) return
+    const state = this.store.load(taskId)
+    const childId = state?.acceptedChild ?? state?.reservedChild
+    if (!childId) return
+    const child = this.ctx.agents.get(NativeSessionId(childId))
+    if (!child || policy.overrideOf(child.session) === mode) return
+    try { this.#set(child.session, mode, { schemaVersion: 1, sessionId: child.id, mode, ownSeqs: [], active: true }) }
+    catch { /* ensure() applies the same mode on the Sidekick's next request */ }
+  }
+
   /**
    * Frozen acceptance checks are plugin-issued and nested in a Lead tool call, so
    * they would inherit the Lead's read-only session. They run under the user's
@@ -140,6 +154,7 @@ export class NativeRoleSandbox {
       const intent = this.#intent(session.id)
       if (!intent?.active || intent.ownSeqs.includes(event.seq)) return
       intent.mode = (event.data as { mode: Mode }).mode
+      this.#pushSidekickMode(binding.taskId, intent.mode)
       // Appending inside this event's publication is rejected as reentrant; re-confine next tick.
       setImmediate(() => {
         try {

@@ -23,7 +23,8 @@ const styles = `
 .fusion-settings fieldset{padding:0;margin:0;border:0;min-inline-size:0;display:flex;flex-direction:column;gap:10px}
 .fusion-settings legend{font-size:15px;font-weight:600;padding:0 0 4px}
 .fusion-settings label{display:grid;grid-template-columns:85px minmax(0,1fr);align-items:center;gap:12px;font-size:13px}
-.fusion-settings select{box-sizing:border-box;min-width:0;width:100%;min-height:36px;border:1px solid var(--dsw-alias-border-l2);border-radius:7px;padding:5px 9px;background:var(--dsw-alias-bg-page-primary);color:inherit;font:inherit}
+.fusion-settings :is(select,option,optgroup){background-color:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);color-scheme:inherit}
+.fusion-settings select{box-sizing:border-box;min-width:0;width:100%;min-height:36px;border:1px solid var(--dsw-alias-border-l2);border-radius:7px;padding:5px 9px;font:inherit}
 .fusion-settings .fusion-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .fusion-settings button{border:1px solid var(--dsw-alias-border-l2);border-radius:18px;background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary));color:var(--dsw-alias-label-primary-foreground,#fff);padding:7px 18px;font:inherit;font-size:13px;cursor:pointer}
 .fusion-settings button:disabled{opacity:.5;cursor:default}
@@ -32,7 +33,7 @@ const styles = `
 .fusion-settings details{font-size:13px;line-height:21px}
 .fusion-settings summary{cursor:pointer;font-weight:500}
 .fusion-settings .fusion-limits{display:flex;flex-direction:column;gap:12px;padding-top:14px}
-.fusion-settings input[type=number]{min-width:0;width:100%;box-sizing:border-box;background:var(--dsw-alias-bg-page-primary);border:1px solid var(--dsw-alias-border-l2);border-radius:7px;padding:8px;color:inherit;font:inherit}
+.fusion-settings input[type=number]{min-width:0;width:100%;box-sizing:border-box;background-color:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);border:1px solid var(--dsw-alias-border-l2);border-radius:7px;padding:8px;font:inherit}
 .fusion-settings .fusion-consent{display:flex;align-items:flex-start;gap:8px;font-size:12px;line-height:18px}
 .fusion-cache{display:flex;flex-direction:column;gap:12px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:20px}.fusion-cache h3{margin:0}.fusion-cache-model{display:flex;flex-direction:column;gap:8px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px}.fusion-cache-model small{display:block;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}.fusion-cache-controls{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr) auto;gap:10px;align-items:end}.fusion-cache-controls label{grid-template-columns:1fr;gap:4px}.fusion-cache a{color:var(--dsw-alias-brand-primary)}
 @media(max-width:560px){.fusion-cache-controls{grid-template-columns:1fr}}
@@ -133,7 +134,7 @@ export function FusionSettings() {
           </div>
         </details>
       </fieldset>
-      <div className="fusion-actions"><p>{tr(lang, '已选中的会话保留原组合；新选择使用新组合。', 'Conversations already using Fusion keep their pair; new selections use the new one.')}</p>
+      <div className="fusion-actions"><p>{tr(lang, '已选中的会话保留原组合；新选择使用新组合。额度耗尽后要换当前任务的 Sidekick，用该会话的 Fusion 恢复面板，而不是只改这里。', 'Conversations already using Fusion keep their pair; new selections use the new one. After a quota stop, switch this conversation\'s Sidekick from its Fusion recovery panel, not only here.')}</p>
         <button disabled={saving || !draft.lead || !draft.worker || JSON.stringify(draft) === JSON.stringify(state.pair)} onClick={() => { void save() }}>{saving ? tr(lang, '正在保存…', 'Saving…') : tr(lang, '保存组合', 'Save pair')}</button>
       </div>
       {notice && <p role="status">{notice}</p>}

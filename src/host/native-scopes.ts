@@ -7,6 +7,7 @@ import { requestOutputReservation } from '../context/guard.js'
 import type { PhysicalRoute, Role } from '../contracts.js'
 import type { SessionBinding } from './bindings.js'
 import { digestOf } from '../digest.js'
+import { fusionToolDiagnostic, projectRoleTools } from './tool-table.js'
 
 export interface FusionScopeCallbacks {
   route?(binding: SessionBinding, role: Role): PhysicalRoute
@@ -123,12 +124,19 @@ export class NativeFusionScopes {
       entry.refreshTools()
       const assembled = await next()
       const route = this.callbacks.route?.(entry.binding, role) ?? entry.binding.profile[role]
-      return { ...assembled, variables: { ...assembled.variables, provider: route.provider, model: route.model },
-        // Native restrictions intentionally leave agent-local registrations
-        // visible. Project only read-stage capabilities into this stage's
-        // request; the deny-only guard still rejects hidden local tools.
-        ...(readOnlyTools === undefined ? {} : { tools: assembled.tools.filter(tool => readOnlyTools?.includes(tool.name)
-          || role === 'worker' && ['fusion_read_state', 'fusion_read_evidence', 'fusion_submit_result'].includes(tool.name)) }) }
+      // Another plugin may replace assembled.tools inside next() (dsh-tool-search
+      // swaps in its eager set). Put this role's permitted tools back from the
+      // registry. Required means "this agent registered it and the role may see
+      // it", so a legacy allowlist that names a model-like-only tool is not a gap.
+      // The deny-only guard still rejects a hidden local tool that was not restored.
+      const projected = projectRoleTools({
+        assembled: assembled.tools,
+        allowlist: readOnlyTools,
+        registry: scope.tools.schemas(agent),
+        always: role === 'worker' ? ['fusion_read_state', 'fusion_read_evidence', 'fusion_submit_result'] : [],
+      })
+      if (projected.missing.length) throw new Error(fusionToolDiagnostic(projected.missing))
+      return { ...assembled, variables: { ...assembled.variables, provider: route.provider, model: route.model }, tools: projected.tools }
     }, { prepend: true }))
     entry.dispose.push(scope.on('agent/request', async ({ agent: requesting, turn, step, signal }, next) => {
       this.assertReady(requesting)
