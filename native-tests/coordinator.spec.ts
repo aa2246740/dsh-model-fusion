@@ -4020,6 +4020,37 @@ describe.skipIf(process.platform === 'win32')('exploration reports when a fresh 
   })
 
   it.each([
+    { label: 'legacy', workflow: {} },
+    { label: 'enforced-v2', workflow: { ...options, enforcedWorkflow: 'enforced-v2' as const } },
+  ])('finishes an accepted read-only answer after an unrelated FIFO appears ($label)', async ({ workflow }) => {
+    let workspace = ''
+    const fixture = await setup([explore(), () => {
+      execFileSync('mkfifo', [join(workspace, 'unrelated.pipe')])
+      return toolCallResponse('finish', 'fusion_finish_direct', {})
+    }, textResponse('It subtracts.')], [findings()], workflow)
+    workspace = fixture.workspace
+    fixture.parent.followup(createUserMessage({ content: [{ type: 'text', text: 'What does add do? Do not change it.' }] }))
+    await fixture.parent.whenIdle()
+    expect(fixture.coordinator.state(fixture.taskId), JSON.stringify(toolResults(fixture.parent)))
+      .toMatchObject({ phase: 'COMPLETED', verification: 'unverified', control: { recovering: false } })
+    expect(JSON.stringify(toolResults(fixture.parent))).not.toContain('Unsupported source file type')
+  })
+
+  it('still refuses to finish a read-only answer whose cited file changed when an unrelated FIFO is present', async () => {
+    let workspace = ''
+    const fixture = await setup([explore(), () => {
+      execFileSync('mkfifo', [join(workspace, 'unrelated.pipe')])
+      writeFileSync(join(workspace, 'calc.py'), 'changed\n')
+      return toolCallResponse('finish', 'fusion_finish_direct', {})
+    }, textResponse('The cited source changed.')], [findings()], { ...options, enforcedWorkflow: 'enforced-v2' })
+    workspace = fixture.workspace
+    fixture.parent.followup(createUserMessage({ content: [{ type: 'text', text: 'What does add do? Do not change it.' }] }))
+    await fixture.parent.whenIdle()
+    expect(fixture.coordinator.state(fixture.taskId).phase).not.toBe('COMPLETED')
+    expect(JSON.stringify(toolResults(fixture.parent))).toContain('Cited exploration evidence changed')
+  })
+
+  it.each([
     { label: 'changed', apply: (root: string) => writeFileSync(join(root, 'calc.py'), 'changed\n'), message: 'changed during capture' },
     { label: 'deleted', apply: (root: string) => rmSync(join(root, 'calc.py')), message: 'Exploration source is missing' },
     { label: 'replaced with a symlink', apply: (root: string) => { rmSync(join(root, 'calc.py')); writeFileSync(join(root, 'copy.py'), 'def add(a, b):\n    return a - b\n'); symlinkSync('copy.py', join(root, 'calc.py')) }, message: 'symlink' },

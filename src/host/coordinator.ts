@@ -1813,15 +1813,20 @@ export class FusionCoordinator {
           && state.exploration?.workOrderId === state.currentWorkOrder.id && state.exploration.status === 'completed'
         if (!explored && (state.currentWorkOrder || state.intent !== 'DIRECT')) throw new Error('Use the bound report and review flow for delegated work')
         if (this.effects.pending(binding.taskId).length) throw new Error('Collect or stop every native job before completing the direct task')
-        const snapshot = snapshotWorkspace(this.#runtime(binding.taskId).root)
+        const runtime = this.#runtime(binding.taskId)
+        let snapshot: WorkspaceSnapshot['id']
         if (explored) {
           if (state.lease) throw new Error('Read-only exploration still holds a write lease')
-          const cited = citedEvidenceChanged(this.#runtime(binding.taskId).root, this.#runtime(binding.taskId).base, state.exploration!)
+          const cited = citedEvidenceChanged(runtime.root, runtime.base, state.exploration!)
           if (cited) throw new Error(`Cited exploration evidence changed: ${cited}. Frozen baseline ${state.exploration!.snapshot}.`)
+          // The cited files decide a read-only answer. An unrelated FIFO or socket that breaks
+          // the whole-tree snapshot falls back to the baseline those files were checked against.
+          try { snapshot = snapshotWorkspace(runtime.root).id }
+          catch { snapshot = state.exploration!.snapshot }
           this.append(binding.taskId, 'intent/chosen', { intent: 'DIRECT' })
-        }
+        } else snapshot = snapshotWorkspace(runtime.root).id
         this.#release(binding.taskId)
-        this.append(binding.taskId, 'task/completed', { snapshot: snapshot.id, verification: 'unverified' })
+        this.append(binding.taskId, 'task/completed', { snapshot, verification: 'unverified' })
         return 'Direct task recorded; describe the checks you actually ran and any remaining uncertainty.'
       } })))
     dispose.push(scope.tools.register(defineTool({ name: 'fusion_explore', description: 'Optionally ask the persistent Worker for read-only code exploration before you plan implementation. It returns source-backed findings without changing files or running commands. Later fusion_delegate continues the same Worker.',
