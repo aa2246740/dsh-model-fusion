@@ -70,6 +70,9 @@ export interface FusionStatus {
         }[];
         pendingApprovals: number;
         unsettledTools: number;
+        /** True while a human inspection is required before continue, model switch, or leaving Fusion. */
+        recovering?: boolean;
+        outcomeUnknown?: boolean;
     };
 }
 export interface RoleUsage {

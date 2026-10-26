@@ -133,7 +133,7 @@ export function FusionSettings() {
           </div>
         </details>
       </fieldset>
-      <div className="fusion-actions"><p>{tr(lang, '已选中的会话保留原组合；新选择使用新组合。', 'Conversations already using Fusion keep their pair; new selections use the new one.')}</p>
+      <div className="fusion-actions"><p>{tr(lang, '已选中的会话保留原组合；新选择使用新组合。额度耗尽后要换当前任务的 Sidekick，用该会话的 Fusion 恢复面板，而不是只改这里。', 'Conversations already using Fusion keep their pair; new selections use the new one. After a quota stop, switch this conversation\'s Sidekick from its Fusion recovery panel, not only here.')}</p>
         <button disabled={saving || !draft.lead || !draft.worker || JSON.stringify(draft) === JSON.stringify(state.pair)} onClick={() => { void save() }}>{saving ? tr(lang, '正在保存…', 'Saving…') : tr(lang, '保存组合', 'Save pair')}</button>
       </div>
       {notice && <p role="status">{notice}</p>}
