@@ -63,6 +63,7 @@ const READ_TOOLS = new Set(['fusion_read_state', 'glob', 'grep', 'read', 'fusion
 const isRead = (exec: Readonly<ToolExecution>) => READ_TOOLS.has(exec.name)
   || exec.name === 'str_replace_editor' && (exec.arguments as { command?: unknown }).command === 'view'
 const FUSION_TOOLS = new Set(['fusion_read_state', 'fusion_delegate_text', 'fusion_explore', 'fusion_delegate', 'fusion_rework', 'fusion_wait', 'fusion_review_result', 'fusion_submit_result', 'fusion_takeover', 'fusion_finish_direct', 'fusion_read_evidence'])
+const WORKER_FUSION_TOOLS = new Set(['fusion_submit_result', 'fusion_read_state', 'fusion_read_evidence'])
 export interface CoordinatorOptions {
   profile: ResolvedProfile
   workerTools: readonly string[]
@@ -751,10 +752,15 @@ export class FusionCoordinator {
       const problem = workerToolBriefProblem(this.store, binding.taskId, exec, this.#runtime(binding.taskId).briefRevision ?? 0)
       if (problem) return problem
     }
-    if (role === 'worker' && state.currentWorkOrder?.mode === 'text' && !['fusion_submit_result', 'fusion_read_state', 'fusion_read_evidence'].includes(exec.name)) return 'Text delegation has no external tools; prepare the result from the supplied material'
+    if (role === 'worker' && state.currentWorkOrder?.mode === 'text' && !WORKER_FUSION_TOOLS.has(exec.name)) return 'Text delegation has no external tools; prepare the result from the supplied material'
     if (role === 'worker' && state.currentWorkOrder?.mode === 'explore'
       && !isRead(exec) && exec.name !== 'fusion_submit_result') {
       return 'Exploration is read-only: use file search/read tools and fusion_submit_result with source ranges; no shell, edits or run_code'
+    }
+    // The Sidekick's ceiling also holds at execution. A tool another plugin registers on the
+    // Worker itself survives both the 0.2.0 start-time toolFilter and the 0.2.1 scope restriction.
+    if (role === 'worker' && !this.options.workerTools.includes(exec.name) && !WORKER_FUSION_TOOLS.has(exec.name)) {
+      return `${exec.name} is outside the Sidekick's configured tools (${this.options.workerTools.join(', ')})`
     }
     if (binding.profile.interactionMode === 'model-like' && !isRead(exec)) {
       const restore = this.onDemand.blocked(exec.agent, binding)

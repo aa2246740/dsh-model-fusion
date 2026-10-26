@@ -699,6 +699,25 @@ describe('read-only exploration before a Lead plan', () => {
       request.tools?.some(tool => tool.name === 'write') && request.tools.some(tool => tool.name === shellTool))).toBe(true)
   })
 
+  it.each([
+    { label: 'legacy', lead: () => [delegate(), review('accept'), textResponse('Verified.')], options: {} },
+    { label: 'enforced-v3', lead: () => [delegateV3(), acceptV3(), textResponse('Verified.')], options: { modelLike: true, enforcedWorkflow: 'enforced-v3' as const, sandbox: true } },
+  ])('refuses a forged agent-local tool call from an implementing Worker ($label)', async ({ lead, options }) => {
+    const { ctx, coordinator, parent, taskId, workspace } = await setup(lead(),
+      [toolCallResponse('forbidden-local', 'child_local_probe', {}), edit(), report()],
+      { files: true, presetTools: true, ...options })
+    // 0.2.1 disposes an idle child at settlement, so collect its results while it is live.
+    const workerToolResults: string[] = []
+    ctx.on('session/event', (session: { header: { parentSession?: string } }, event: { type: string }) => {
+      if (event.type === 'tool/result' && session.header.parentSession) workerToolResults.push(JSON.stringify(event))
+    })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+    expect(workerToolResults.join('\n')).toContain('child_local_probe is outside the Sidekick')
+    expect(() => readFileSync(join(workspace, 'must-not-exist'))).toThrow()
+    expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+  })
+
   it('keeps exploration feedback separate from implementation feedback on the same persistent Worker', async () => {
     const { parent, coordinator, adapter, store, taskId } = await setup([
       explore(), toolCallResponse('explore-more', 'fusion_rework', { feedback: 'Confirm the exact source line; do not modify it.' }),
