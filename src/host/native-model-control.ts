@@ -10,6 +10,7 @@ import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import { BindingRepository, type SessionBinding } from './bindings.js'
 import { adaptiveWorkflow, enforcedWorkflow } from './native-workflow.js'
 import { isShellTool } from './shell.js'
+import { unsettledContinuationError } from './worker-terminal.js'
 
 const LEAD_RECOVERABLE = ['WORKFLOW_INCOMPLETE', 'NO_PROGRESS', 'UNKNOWN']
 const LEAD_RECOVERIES = 2
@@ -226,7 +227,10 @@ export class NativeModelControl {
       const current = this.#bindings.read(sessionId)
       if (current?.revision !== initial.bindingRevision || this.userSeq(agent) !== userSeq) throw new Error(bi('暂停期间任务或用户消息已变化，请刷新', 'The task or messages changed while paused; refresh'))
       ;({ view, binding } = this.require(sessionId, taskId, revision))
-      if (!this.callbacks.settled(binding)) throw new Error(bi('中断的操作尚未确认结束，请先使用 /fusion recover 核对', 'Interrupted operations are not confirmed finished; use /fusion recover first'))
+      if (!this.callbacks.settled(binding)) {
+        const text = unsettledContinuationError(Boolean(change))
+        throw new Error(bi(text.zh, text.en))
+      }
       const operation = { id: randomUUID(), taskId, state: 'prepared' as const }
       const message = createUserMessage({ content: [{ type: 'text', text: `Continue the existing Fusion task ${taskId} from its saved state. Read fusion_read_state if needed. Preserve accepted constraints and inspect uncertain effects before replay. Local continuation operation: ${operation.id}.` }],
         source: { kind: 'plugin:dsh-model-fusion', form: 'notice', summary: bi('用户通过 Fusion 控件继续当前任务', 'The user continued the task from the Fusion controls') } })

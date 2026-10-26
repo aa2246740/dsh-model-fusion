@@ -51,3 +51,37 @@ sandbox) and stores its own records in its plugin directory.
 5. Cold-boot the plugin alone in a temporary home: `dshx verify-boot <plugin dir>`.
 6. Install into a real DSH and run a short task with a Fusion pair; check the Lead read-only probe from the README.
 7. Update the supported version in `README.md`, `README.en.md`, `INSTALL*.md` and this file.
+
+## Other plugins that rewrite the tool table
+
+Fusion registers `fusion_*` tools on the agent and then filters `system-prompt/assemble` down to the role allowlist.
+That filter only removes tools. A plugin that **replaces** `assembled.tools` inside the same hook — `dsh-tool-search` does
+this, keeping an eager set such as `bash`, `glob`, `grep`, `read` and moving everything else, including `fusion_*` and
+often `job_output`, out of the request — used to leave the Lead with no delegation tool. The task could then end
+`COMPLETED` without any Fusion work.
+
+Fusion now rebuilds the request table as **allowlist ∪ its own registry** after `next()` returns. Names the role is
+allowed to see are copied back from `tools.schemas(agent)` when another plugin dropped them. If a required `fusion_*`
+tool is not in that registry either, assembly throws `FUSION_TOOL_TABLE_INCOMPLETE` instead of sending the request.
+Putting those names in `dsh-tool-search`'s `core` list is unnecessary once this build is installed; it remains harmless.
+
+## Host behaviour Fusion does not own
+
+These show up next to Fusion's own gates. Fusion does not patch the host to remove them.
+
+- **Sandbox read-only denial.** `[sandbox: file access denied under read-only mode]` is the DSH sandbox backend.
+  enforced-v3 keeps the Lead's session read-only on purpose. The Sidekick is given the mode the user chose for the
+  conversation. Fusion applies that mode when the user appends `sandbox/mode`, including onto a resident Sidekick, and
+  again on the Sidekick's next model request. It never widens the Lead, and it cannot grant a mode the user did not set.
+  A Sidekick that has already been disposed has no session left to update; the next delegation seeds a new one.
+- **Reload recovery after a quota stop.** A Worker that stops on provider quota often leaves its `native-worker` outbox
+  row `accepted` because no report was acknowledged. The next host start treats that row like any other unacknowledged
+  dispatch and sets `recovering`. Continue and role switch both run only after `settled()`, which requires
+  `recovering` to be clear, and the route is not written if that check fails. That inspection stays: Fusion cannot see
+  host file or process effects that were not in its own journal. Use `/fusion recover <inspection note>`, then continue
+  or switch the Sidekick from the recovery panel. Saving a new pair in Settings changes the default for new
+  conversations only.
+- **Natural Worker disposal.** DSH `0.2.0-rc.2` disposes a continuable child in `finishDisposal` and only then sends
+  `subagent-settled`. `fusion_wait` reads the persisted task when that handle is already gone. It asks for recovery
+  only when a native effect is still pending or the outcome is unknown. An ended Worker with no report is
+  `WORKFLOW_INCOMPLETE`, not a quota or provider outage.

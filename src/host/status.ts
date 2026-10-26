@@ -106,5 +106,7 @@ function readStatus(store: SqliteFusionStore, sessionId: string, index: StatusIn
     automatedChecks: Array.isArray((runtime as { checks?: unknown[] } | undefined)?.checks) && runtime?.taskId === taskId
       ? (runtime as { checks: unknown[] }).checks.length : null,
     pendingApprovals: state.control.pendingApprovalIds.length,
+    recovering: state.control.recovering,
+    outcomeUnknown: state.control.outcomeUnknown,
   } }
 }

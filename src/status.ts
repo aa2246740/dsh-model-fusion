@@ -45,6 +45,9 @@ export interface FusionStatus {
       quality: TokenMeasurement['quality']; admitted: boolean; checkedAt: string }[]
     pendingApprovals: number
     unsettledTools: number
+    /** True while a human inspection is required before continue, model switch, or leaving Fusion. */
+    recovering?: boolean
+    outcomeUnknown?: boolean
   }
 }
 

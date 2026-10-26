@@ -2,6 +2,7 @@ import LocalSandbox from '@deepseek-ai/dsh-sandbox-local'
 import SandboxPolicy from '@deepseek-ai/dsh-sandbox-policy'
 import { parse as parseYaml } from 'yaml'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -965,7 +966,11 @@ describe('last admitted Worker request', () => {
     expect(readFileSync(join(workspace, 'calc.py'), 'utf8')).toContain('return a + b')
     expect(store.readDocument(`runtime:${taskId}`)?.value).not.toMatchObject({ submitted: expect.anything() })
     expect(coordinator.state(taskId).control.mode).not.toBe('completed')
-    expect(JSON.stringify(toolResults(parent))).toContain('Worker stopped without fusion_submit_result')
+    // The edit was the one admitted Worker request, so the missing report is the step limit.
+    const leadResult = JSON.stringify(toolResults(parent))
+    expect(leadResult).toContain('worker-step-limit')
+    expect(leadResult).toContain('No further Worker request can be admitted')
+    expect(leadResult).not.toContain('fusion_submit_result')
   })
 
   it.each(['budget', 'pause', 'recovery'] as const)('still rejects final-request effects if the %s control gate closes', async gate => {
@@ -3897,5 +3902,172 @@ describe('enforced-v3 daily-driver safeguards (study 2026-09-26)', () => {
     expect(leadRequests.some(request => catalog(request).includes('fusion_submit_result'))).toBe(true)
     expect(catalog(leadRequests.at(-1)!)).not.toContain('fusion_submit_result')
     expect(parent.session.snapshotEvents().filter(event => event.type === 'sandbox/mode').at(-1)?.data).toMatchObject({ mode: 'read-only' })
+  })
+})
+
+/** dsh-tool-search replaces assembled.tools inside system-prompt/assemble. Fusion's prepend hook calls next() first, so this listener runs underneath it. */
+function replaceAssembledTools(scope: Context): void {
+  const eager = new Set(['read', 'glob', 'grep', 'bash', 'pwsh', 'write', 'edit'])
+  scope.on('system-prompt/assemble', async (_assembly, _context, next) => {
+    const assembled = await next()
+    return { ...assembled, tools: assembled.tools.filter(tool => eager.has(tool.name)) }
+  })
+}
+
+const requestToolNames = (request: { tools?: { name: string }[] | undefined }) => (request.tools ?? []).map(tool => tool.name)
+
+describe('profile registrations against the real role allowlist', () => {
+  it('serves a legacy Lead request without requiring tools that profile never registered', async () => {
+    const { parent, adapter } = await setup([textResponse('Hello.')])
+    replaceAssembledTools(parent.ctx)
+    parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Hello.' }] }))
+    await parent.whenIdle()
+    expect(adapter.requests).toHaveLength(1)
+    const names = requestToolNames(adapter.requests[0]!)
+    expect(names).toEqual(expect.arrayContaining(['fusion_delegate', 'fusion_explore', 'fusion_read_evidence', 'fusion_wait', 'fusion_review_result']))
+    for (const absent of ['fusion_read_state', 'fusion_delegate_text', 'write', 'edit']) expect(names).not.toContain(absent)
+    expect(JSON.stringify(parent.session.snapshotEvents())).not.toContain('FUSION_TOOL_TABLE_INCOMPLETE')
+  })
+
+  it('serves a legacy explore Worker without requiring fusion_read_state', async () => {
+    const { parent, ctx, adapter } = await setup(
+      [explore(), textResponse('Waiting.')],
+      [readCalc(), findings()],
+      { files: true },
+    )
+    ctx.on('agent/created', ({ agent }) => {
+      if (!agent.session.header.parentSession) return
+      replaceAssembledTools(agent.ctx)
+    })
+    parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Explain the addition code.' }] }))
+    await parent.whenIdle()
+    const worker = adapter.requests.find(request => request.model === 'worker')
+    expect(worker).toBeTruthy()
+    const names = requestToolNames(worker!)
+    expect(names).toEqual(expect.arrayContaining(['read', 'fusion_read_evidence', 'fusion_submit_result']))
+    for (const absent of ['fusion_read_state', 'write', 'edit', 'fusion_delegate']) expect(names).not.toContain(absent)
+    expect(JSON.stringify(parent.session.snapshotEvents())).not.toContain('FUSION_TOOL_TABLE_INCOMPLETE')
+  })
+
+  it('includes model-like Lead and Worker tools that those profiles actually register', async () => {
+    const lead = await setup([textResponse('Hello.')], undefined, { modelLike: true, files: true })
+    lead.parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Hello.' }] }))
+    await lead.parent.whenIdle()
+    const leadNames = requestToolNames(lead.adapter.requests[0]!)
+    expect(leadNames).toEqual(expect.arrayContaining(['fusion_read_state', 'fusion_delegate_text', 'fusion_delegate']))
+    expect(lead.adapter.requests).toHaveLength(1)
+
+    const worker = await setup(
+      [explore(), textResponse('Waiting.')],
+      [readCalc(), findings()],
+      { modelLike: true, files: true },
+    )
+    worker.parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Explain the addition code.' }] }))
+    await worker.parent.whenIdle()
+    const workerRequest = worker.adapter.requests.find(request => request.model === 'worker')
+    const workerNames = requestToolNames(workerRequest!)
+    expect(workerNames).toEqual(expect.arrayContaining(['read', 'fusion_read_state', 'fusion_read_evidence', 'fusion_submit_result']))
+    for (const absent of ['write', 'edit', 'fusion_delegate', 'fusion_delegate_text']) expect(workerNames).not.toContain(absent)
+  })
+
+  it('restores a read-only enforced Lead catalog and still withholds write tools', async () => {
+    const { parent, adapter } = await setup([textResponse('Hello.')], undefined, { modelLike: true, enforcedWorkflow: 'enforced-v3' as const, files: true, sandbox: true })
+    replaceAssembledTools(parent.ctx)
+    parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Hello.' }] }))
+    await parent.whenIdle()
+    expect(adapter.requests).toHaveLength(1)
+    const names = requestToolNames(adapter.requests[0]!)
+    expect(names).toEqual(expect.arrayContaining(['read', 'fusion_delegate', 'fusion_read_state', 'fusion_delegate_text', 'fusion_read_evidence', 'fusion_explore']))
+    for (const denied of ['write', 'edit', 'fusion_takeover', 'fusion_submit_result']) expect(names).not.toContain(denied)
+  })
+})
+
+describe.skipIf(process.platform === 'win32')('exploration reports when a fresh workspace snapshot cannot be taken', () => {
+  const options = { modelLike: true, enforcedWorkflow: 'enforced-v3' as const, files: true, sandbox: true }
+  const stored = (store: Awaited<ReturnType<typeof setup>>['store'], taskId: string) =>
+    store.readDocument(`runtime:${taskId}`)?.value as { explorationSubmitted?: { status: string; unresolved: string[] } } | undefined
+
+  it.each(['blocked', 'needs-decision'] as const)('stores a %s report after an unrelated FIFO breaks the snapshot', async status => {
+    let workspace = ''
+    const fixture = await setup([explore(), textResponse('Waiting for findings.')], [() => {
+      execFileSync('mkfifo', [join(workspace, 'unrelated.pipe')])
+      return toolCallResponse('blocked-report', 'fusion_submit_result', { status, summary: 'The unrelated workspace changed.', unresolved: ['Need a decision'], sources: [] })
+    }, textResponse('Report could not be submitted.')], options)
+    workspace = fixture.workspace
+    fixture.parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Inspect the addition code.' }] }))
+    await fixture.parent.whenIdle()
+    const report = stored(fixture.store, fixture.taskId)?.explorationSubmitted
+    expect(report?.status).toBe(status)
+    expect(report?.unresolved.join('\n')).toContain('Unsupported source file type: unrelated.pipe')
+    expect(report?.unresolved.join('\n')).toContain('not acceptance')
+    expect(fixture.coordinator.state(fixture.taskId).exploration?.status).toBe(status)
+  })
+
+  it('accepts a completed exploration that cites an unchanged file when an unrelated FIFO breaks the snapshot', async () => {
+    let workspace = ''
+    const fixture = await setup([explore(), textResponse('Waiting for findings.')], [() => {
+      execFileSync('mkfifo', [join(workspace, 'unrelated.pipe')])
+      return findings()
+    }, textResponse('Report could not be submitted.')], options)
+    workspace = fixture.workspace
+    fixture.parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Inspect the addition code.' }] }))
+    await fixture.parent.whenIdle()
+    const report = stored(fixture.store, fixture.taskId)?.explorationSubmitted
+    expect(report?.status).toBe('completed')
+    expect(report?.unresolved ?? []).toEqual([])
+    expect(fixture.coordinator.state(fixture.taskId).exploration?.status).toBe('completed')
+    expect(JSON.stringify(toolResults(fixture.parent))).not.toContain('Unsupported source file type')
+  })
+
+  it.each([
+    { label: 'legacy', workflow: {} },
+    { label: 'enforced-v2', workflow: { ...options, enforcedWorkflow: 'enforced-v2' as const } },
+  ])('finishes an accepted read-only answer after an unrelated FIFO appears ($label)', async ({ workflow }) => {
+    let workspace = ''
+    const fixture = await setup([explore(), () => {
+      execFileSync('mkfifo', [join(workspace, 'unrelated.pipe')])
+      return toolCallResponse('finish', 'fusion_finish_direct', {})
+    }, textResponse('It subtracts.')], [findings()], workflow)
+    workspace = fixture.workspace
+    fixture.parent.followup(createUserMessage({ content: [{ type: 'text', text: 'What does add do? Do not change it.' }] }))
+    await fixture.parent.whenIdle()
+    expect(fixture.coordinator.state(fixture.taskId), JSON.stringify(toolResults(fixture.parent)))
+      .toMatchObject({ phase: 'COMPLETED', verification: 'unverified', control: { recovering: false } })
+    expect(JSON.stringify(toolResults(fixture.parent))).not.toContain('Unsupported source file type')
+  })
+
+  it('still refuses to finish a read-only answer whose cited file changed when an unrelated FIFO is present', async () => {
+    let workspace = ''
+    const fixture = await setup([explore(), () => {
+      execFileSync('mkfifo', [join(workspace, 'unrelated.pipe')])
+      writeFileSync(join(workspace, 'calc.py'), 'changed\n')
+      return toolCallResponse('finish', 'fusion_finish_direct', {})
+    }, textResponse('The cited source changed.')], [findings()], { ...options, enforcedWorkflow: 'enforced-v2' })
+    workspace = fixture.workspace
+    fixture.parent.followup(createUserMessage({ content: [{ type: 'text', text: 'What does add do? Do not change it.' }] }))
+    await fixture.parent.whenIdle()
+    expect(fixture.coordinator.state(fixture.taskId).phase).not.toBe('COMPLETED')
+    expect(JSON.stringify(toolResults(fixture.parent))).toContain('Cited exploration evidence changed')
+  })
+
+  it.each([
+    { label: 'changed', apply: (root: string) => writeFileSync(join(root, 'calc.py'), 'changed\n'), message: 'changed during capture' },
+    { label: 'deleted', apply: (root: string) => rmSync(join(root, 'calc.py')), message: 'Exploration source is missing' },
+    { label: 'replaced with a symlink', apply: (root: string) => { rmSync(join(root, 'calc.py')); writeFileSync(join(root, 'copy.py'), 'def add(a, b):\n    return a - b\n'); symlinkSync('copy.py', join(root, 'calc.py')) }, message: 'symlink' },
+  ])('rejects a completed report whose cited file was $label even when an unrelated FIFO is present', async ({ apply, message }) => {
+    let workspace = ''
+    const fixture = await setup([explore(), textResponse('Waiting for findings.')], [() => {
+      execFileSync('mkfifo', [join(workspace, 'unrelated.pipe')])
+      apply(workspace)
+      return findings()
+    }, textResponse('Report could not be submitted.')], options)
+    workspace = fixture.workspace
+    fixture.parent.followup(createUserMessage({ content: [{ type: 'text', text: 'Inspect the addition code.' }] }))
+    await fixture.parent.whenIdle()
+    expect(stored(fixture.store, fixture.taskId)?.explorationSubmitted).toBeUndefined()
+    const state = fixture.coordinator.state(fixture.taskId)
+    const child = state.acceptedChild && fixture.ctx.agents.get(SessionId(state.acceptedChild))
+    expect(JSON.stringify(child?.session.snapshotEvents().filter(event => event.type === 'tool/result'))).toContain(message)
+    expect(state.exploration?.status).not.toBe('completed')
   })
 })
