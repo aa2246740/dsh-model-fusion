@@ -40,6 +40,7 @@ import { observeNativeUsage } from './native-usage.js'
 import { NativeAuxiliaryRequests } from './native-auxiliary.js'
 import { NativeCacheKeepalive } from './native-keepalive.js'
 import type { KeepaliveClock } from './native-keepalive.js'
+import { hasStartActivation } from './subagent-seam.js'
 import { NativeWorkerTransport } from './native-worker.js'
 import { NativeFusionActivity } from './native-activity.js'
 import { captureExploration, citedEvidenceChanged } from './native-exploration.js'
@@ -290,11 +291,16 @@ export class FusionCoordinator {
         // enforced-v3 keeps its fixed catalog (prompt cache); the guard refuses tools on a completed task.
         if (role === 'lead' && adaptiveWorkflow(binding) && state.control.mode === 'completed' && !roleSeparated(binding)) return []
         if (role === 'worker') {
-          // 0.2.1 removed the start-time `toolFilter`, so every Worker mode is now
-          // narrowed here instead. `agent/created` installs this scope before the
-          // child's first request, and the deny-only guard stays the second gate.
-          return state.currentWorkOrder?.mode === 'text' ? [] : state.currentWorkOrder?.mode === 'explore'
-            ? this.options.workerTools.filter(name => READ_TOOLS.has(name)) : [...this.options.workerTools]
+          if (state.currentWorkOrder?.mode === 'text') return []
+          if (state.currentWorkOrder?.mode === 'explore') return this.options.workerTools.filter(name => READ_TOOLS.has(name))
+          // Implement mode. 0.2.0 keeps `undefined`: `startContinuable` still
+          // sends `toolFilter`, and returning an array here would also call
+          // `presentAs('native')` in NativeFusionScopes. 0.2.1 has no start-time
+          // toolFilter, so the array is the ceiling. The scope is installed at
+          // `agent/created`, before the child's first request, and that array
+          // also presents the Worker natively, as the read-only modes already were.
+          // The deny-only guard stays the second gate on both hosts.
+          return hasStartActivation(this.ctx.subagents) ? [...this.options.workerTools] : undefined
         }
         const lease = this.#held.get(binding.taskId)
         if (roleSeparated(binding)) return this.#leadWriter(binding, agent) ? undefined : this.#separatedLeadTools(state, binding)
@@ -1041,7 +1047,14 @@ export class FusionCoordinator {
         return this.#collectAbsentWorker(agent, binding, exec)
       }
       try {
-        await this.#stopJobs(binding.taskId, () => this.transport.stop(agent, childId))
+        // 0.2.1 natural settlement may already have disposed the idle child.
+        // Stopping a handle that is gone throws; the journal still decides
+        // whether the writer can be released.
+        await this.#stopJobs(binding.taskId, async () => {
+          const resident = this.ctx.agents.get(NativeSessionId(childId))
+          if (!resident || resident.session.header.parentSession !== agent.id) return
+          await this.transport.stop(agent, childId)
+        })
         if (this.effects.pending(binding.taskId).length) throw new Error('Worker has unfinished native effects')
         this.#release(binding.taskId)
         if (!this.state(binding.taskId).control.recovering) this.append(binding.taskId, 'task/paused', { reason: String(cause) })
@@ -1210,7 +1223,7 @@ export class FusionCoordinator {
       const accepted = binding.workerId
         ? await this.transport.continue(agent, childId, brief, exec.signal)
         : await this.transport.start(agent, { childId, brief, label: args.goal.slice(0, 100),
-          route: this.modelControl.route(binding, 'worker') }, exec.signal)
+          route: this.modelControl.route(binding, 'worker'), persona: binding.prompts.worker, allowedTools: this.options.workerTools }, exec.signal)
       started = true
       this.append(binding.taskId, 'child/accepted', { operationId: order.operationId, child: childId, messageId: accepted.messageId })
       this.store.advanceOutbox(binding.taskId, order.operationId, 'dispatched', 'accepted', { nativeMessageId: accepted.messageId })
@@ -1891,6 +1904,13 @@ export class FusionCoordinator {
       await parent.whenIdle()
       await this.#backgroundStops.get(binding.taskId)
       const state = this.state(binding.taskId)
+      // 0.2.1 delivers subagent-settled when release disposes the child, and that
+      // wake can run #stopBackground before the replacement scan. Record the
+      // gate while `runtime.background` is still the authority for an in-flight handoff.
+      const background = (this.store.readDocument(`runtime:${binding.taskId}`)?.value as { background?: boolean } | undefined)?.background
+      if (background && state.control.mode !== 'completed' && !state.control.recovering) {
+        this.append(binding.taskId, 'recovery/needed', { reason: 'Host runtime was replaced during a background handoff' })
+      }
       const workerId = binding.workerId ?? state.acceptedChild
       const child = workerId && this.ctx.agents.get(NativeSessionId(workerId))
       await this.#stopJobs(binding.taskId)

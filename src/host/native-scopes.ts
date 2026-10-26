@@ -83,6 +83,9 @@ export class NativeFusionScopes {
         // A Lead's capability ceiling is also used when validating a new child.
         // Only mask its prompt; restricting inheritance would disable Worker writes.
         if (role === 'worker') stageDisposers.push(scope.tools.restrict({ allow: tools }))
+        // Any concrete allowlist is presented natively, including an implement-mode
+        // Worker on 0.2.1 whose ceiling moved here from the removed start-time toolFilter.
+        // 0.2.0 implement mode still returns undefined, so this call does not start applying there.
         stageDisposers.push(scope.tools.presentAs('native'))
       }
       presentationKey = key

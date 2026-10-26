@@ -5,6 +5,7 @@ import type { MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type { PhysicalRoute } from '../contracts.js'
+import { requireSubagentMethod } from './subagent-seam.js'
 
 export interface NativeWorkerRequest {
   readonly childId: string
@@ -12,11 +13,50 @@ export interface NativeWorkerRequest {
   /** Model-authored brief from the Lead's native tool call. */
   readonly brief: string
   readonly route: PhysicalRoute
+  /** 0.2.0 startContinuable persona. 0.2.1 rejects it; the role scope carries the prompt. */
+  readonly persona: string
+  /** 0.2.0 start-time tool ceiling. 0.2.1 rejects toolFilter; the role scope narrows tools. */
+  readonly allowedTools: readonly string[]
 }
 
 export interface NativeWorkerAcceptance {
   readonly childId: string
   readonly messageId: MessageId
+}
+
+interface WorkerStartRequest {
+  readonly parent: Agent
+  readonly prompt: readonly { readonly type: 'text'; readonly text: string }[]
+  readonly agentOptions: { readonly provider: string; readonly model: string; readonly reasoningEffort?: ReturnType<typeof ReasoningEffortId> }
+  readonly maxDepth: number
+  readonly persona?: string
+  readonly toolFilter?: { readonly allow: readonly string[] }
+}
+
+interface StartedWorker {
+  readonly childId: string
+  readonly messageId?: MessageId
+}
+
+/** Structural view of the two DSH subagent seams. Only the branch that exists is called. */
+interface SubagentSeam {
+  startActivation?(spec: {
+    readonly provider: string
+    readonly label: string
+    readonly childId: ReturnType<typeof SessionId>
+    readonly delivery: 'parent'
+    readonly request: WorkerStartRequest
+    readonly signal: AbortSignal
+  }): Promise<StartedWorker>
+  startContinuable?(spec: {
+    readonly provider: string
+    readonly label: string
+    readonly childId: ReturnType<typeof SessionId>
+    readonly request: WorkerStartRequest
+    readonly signal: AbortSignal
+  }): Promise<StartedWorker>
+  drainChildren?(parent: Agent, childIds: readonly ReturnType<typeof SessionId>[]): Promise<void>
+  drainContinuableChildren?(parent: Agent, childIds: readonly ReturnType<typeof SessionId>[]): Promise<void>
 }
 
 /** Version-pinned public API adapter. It never calls an LLM adapter or runs a shell itself. */
@@ -36,34 +76,35 @@ export class NativeWorkerTransport {
     this.assertAvailable()
     signal.throwIfAborted()
     if (this.ctx.agents.get(SessionId(request.childId))) throw new Error('Reserved Worker already exists; reconcile before retrying')
-    // 0.2.1 renamed the continuable start and made the result recipient explicit.
-    // `parent` keeps the 0.2.0 behaviour: the child's settlement is delivered to
-    // the Lead's inbox, which this transport then reconciles from the session log.
-    // The Worker's persona prompt and its tool ceiling are NOT start-time inputs
-    // any more (0.2.1 removed `persona`/`toolFilter` from the request and directs
-    // callers to an Agent Preset). Fusion owns both through the native role scope
-    // it installs on the child at `agent/created`, before the child's first
-    // request: the `fusion-role` system-prompt section carries the Worker prompt
-    // and NativeFusionScopes narrows the inherited tool set to `workerTools`.
-    const accepted = await this.ctx.subagents.startActivation({
-      provider: this.provider,
-      label: request.label,
-      childId: SessionId(request.childId),
-      delivery: 'parent',
-      request: {
-        parent,
-        prompt: [{ type: 'text', text: request.brief }],
-        agentOptions: {
-          provider: request.route.provider,
-          model: request.route.model,
-          ...(request.route.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(request.route.reasoningEffort) }),
-        },
-        maxDepth: (parent.session.header.delegationDepth ?? 0) + 1,
-      },
-      signal,
-    })
+    const prompt = [{ type: 'text' as const, text: request.brief }]
+    const agentOptions = {
+      provider: request.route.provider,
+      model: request.route.model,
+      ...(request.route.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(request.route.reasoningEffort) }),
+    }
+    const maxDepth = (parent.session.header.delegationDepth ?? 0) + 1
+    const childId = SessionId(request.childId)
+    // `startActivation` is the 0.2.1 name. `delivery: 'parent'` keeps the 0.2.0
+    // settlement: it reaches the Lead's inbox, which this transport reconciles
+    // from the session log. 0.2.1 rejects `persona` and `toolFilter`; the
+    // `fusion-role` section and NativeFusionScopes own both, and the scope is
+    // installed at `agent/created` before the child's first request.
+    // Otherwise this is 0.2.0 `startContinuable`, persona and toolFilter included.
+    const subagents = this.ctx.subagents as SubagentSeam
+    const start = requireSubagentMethod(subagents, 'startActivation', 'startContinuable')
+    const accepted = start === 'startActivation'
+      ? await subagents.startActivation!({
+        provider: this.provider, label: request.label, childId, delivery: 'parent',
+        request: { parent, prompt, agentOptions, maxDepth }, signal,
+      })
+      : await subagents.startContinuable!({
+        provider: this.provider, label: request.label, childId,
+        request: { parent, prompt, persona: request.persona, agentOptions, toolFilter: { allow: [...request.allowedTools] }, maxDepth },
+        signal,
+      })
     if (accepted.childId !== request.childId) throw new Error('Native Worker identity changed during creation')
-    return accepted
+    if (!accepted.messageId) throw new Error('Native Worker start did not accept an initial message')
+    return { childId: accepted.childId, messageId: accepted.messageId }
   }
 
   /** Only Lead-authored feedback is sent through this public model-message API. */
@@ -119,8 +160,7 @@ export class NativeWorkerTransport {
       await child.whenIdle()
       if (interruptError) throw interruptError
       if (this.ctx.agents.get(child.id) !== child) throw new Error('Worker residency changed; quiescence requires reconciliation')
-      if (!await this.ctx.sessions.flush(child.session)) throw new Error('Worker log persistence unavailable')
-      this.#flushed.set(child, child.session.snapshotEvents().at(-1)?.seq ?? 0)
+      await this.#flushSettled(child)
       return child
     } finally { removeSteering(); signal.removeEventListener('abort', interrupt) }
   }
@@ -133,17 +173,35 @@ export class NativeWorkerTransport {
     this.ctx.subagents.interrupt(child.id, { kind: 'ancestor', agent: parent })
     await child.whenIdle()
     if (this.ctx.agents.get(child.id) !== child) throw new Error('Worker residency changed during stop')
-    if (!await this.ctx.sessions.flush(child.session)) throw new Error('Worker log persistence unavailable')
-    this.#flushed.set(child, child.session.snapshotEvents().at(-1)?.seq ?? 0)
+    await this.#flushSettled(child)
     return child
+  }
+
+  /**
+   * 0.2.1 natural settlement flushes the child, then closes the persistence
+   * handle. A stop that loses that race must not treat the closed handle as a
+   * lost log. Any other flush failure still means the log is not durable.
+   */
+  async #flushSettled(child: Agent): Promise<void> {
+    try {
+      if (!await this.ctx.sessions.flush(child.session)) throw new Error('Worker log persistence unavailable')
+    } catch (error) {
+      if (!(error instanceof Error) || error.name !== 'SessionHandleClosedError') throw error
+      return
+    }
+    this.#flushed.set(child, child.session.snapshotEvents().at(-1)?.seq ?? 0)
   }
 
   /** Native release owns quiescence, persistence and handle disposal across HMR. */
   async release(parent: Agent, childId: string): Promise<void> {
     const child = this.ctx.agents.get(SessionId(childId))
     if (child && child.session.header.parentSession !== parent.id) throw new Error('Cannot release another Lead’s child')
-    // 0.2.1 renamed this drain; `drainDescendants` is the broader parent-set form.
-    await this.ctx.subagents.drainChildren(parent, [SessionId(childId)])
+    // 0.2.1 calls this `drainChildren`. 0.2.0 calls it `drainContinuableChildren`.
+    const subagents = this.ctx.subagents as SubagentSeam
+    const drain = requireSubagentMethod(subagents, 'drainChildren', 'drainContinuableChildren')
+    const ids = [SessionId(childId)]
+    if (drain === 'drainChildren') await subagents.drainChildren!(parent, ids)
+    else await subagents.drainContinuableChildren!(parent, ids)
     if (this.ctx.agents.get(SessionId(childId))) throw new Error('Native Worker release did not prove absence')
   }
 

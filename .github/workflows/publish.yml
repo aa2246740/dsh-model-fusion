@@ -29,7 +29,10 @@ jobs:
     timeout-minutes: 30
     env:
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
-      HARNESS_REF: dsh-v0.2.1-rc.2
+      # scripts/build.mjs accepts 0.2.0-rc.2 and 0.2.1-rc.2. CI stays on
+      # 0.2.0-rc.2 because the external devkit pins that tag and lib/ in git
+      # is built with that harness.
+      HARNESS_REF: dsh-v0.2.0-rc.2
       npm_config_auto_install_peers: 'false'
       PNPM_CONFIG_AUTO_INSTALL_PEERS: 'false'
     steps:

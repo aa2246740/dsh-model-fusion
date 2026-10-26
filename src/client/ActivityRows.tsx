@@ -7,6 +7,7 @@ import type { ActivityRow } from './activity-model.js'
 const labelsFor = (lang: Lang) => ({ codeLabel: tr(lang, '代码', 'Code'), wrapLabel: tr(lang, '自动换行', 'Wrap'), unwrapLabel: tr(lang, '取消自动换行', 'No wrap'),
   copy: tr(lang, '复制', 'Copy'), copied: tr(lang, '已复制', 'Copied'), collapseAria: tr(lang, '收起内容', 'Collapse'), collapse: tr(lang, '收起', 'Collapse'),
   expandAria: (n: number) => tr(lang, `展开其余 ${n} 行`, `Show ${n} more lines`), expand: (n: number) => tr(lang, `展开其余 ${n} 行`, `Show ${n} more lines`) })
+// `commandLine` is required by TerminalBlockLabels on DSH 0.2.1 and ignored on 0.2.0.
 const terminalLabelsFor = (lang: Lang) => ({ ...labelsFor(lang), commandLine: (n: number) => tr(lang, `命令行第 ${n} 行`, `command line ${n}`),
   signal: (s: string) => tr(lang, `信号 ${s}`, `signal ${s}`), exitCode: (n: number) => tr(lang, `退出码 ${n}`, `exit code ${n}`),
   running: tr(lang, '执行中', 'Running'), failed: tr(lang, '执行失败', 'Failed'), done: tr(lang, '已返回', 'Done'), noOutput: tr(lang, '无输出', 'No output'), noExitCode: tr(lang, '未记录退出码', 'No exit code') })

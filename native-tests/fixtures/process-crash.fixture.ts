@@ -11,7 +11,8 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import BasicCompaction from '@deepseek-ai/dsh-compaction-basic'
 import ApprovalService, { type ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { hostPlugin } from '../host-plugin.js'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as Spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import { MockAdapter, textResponse, toolCallResponse } from '@fusion-host-test/mock-adapter'
@@ -79,9 +80,9 @@ it('runs only inside its owned crash harness', async () => {
     ].join('\n'))
   }
   const store = new SqliteFusionStore(join(root, 'fusion.sqlite'))
-  await mountAgentLoopTestDependencies(ctx)
+  await mountAgentLoopTestDependencies(ctx, { workingDirectory: true })
   await ctx.plugin(TokenMeter)
-  await ctx.plugin(JsonlSessionPersistence, { root: join(root, 'sessions') })
+  await ctx.plugin(hostPlugin(JsonlSessionPersistence), { root: join(root, 'sessions') })
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(TestSessionQuery)
   await ctx.plugin(SubagentRuntime)
