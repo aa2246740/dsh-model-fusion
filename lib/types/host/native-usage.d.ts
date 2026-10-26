@@ -9,7 +9,14 @@ export interface UsageOwner {
     readonly taskId: TaskId;
     readonly role: Role;
 }
-/** DSH counters are disjoint; missing provider fields retain unknown applicability. */
+/**
+ * DSH counters are disjoint; missing provider fields retain unknown applicability.
+ *
+ * A counter is known only when the provider reported a real finite number.
+ * Gateways that omit completion_tokens_details send reasoningTokens as null
+ * (seen on some claude-opus-5.5 routes). known(null) throws INVALID_TOKEN_COUNT
+ * inside the llm/stream hook and aborts the turn, so null and NaN stay unknown.
+ */
 export declare function billFromNativeUsage(usage: TokenUsage | undefined): CanonicalBill;
 export interface NativeUsageRecord {
     schemaVersion: 1;
