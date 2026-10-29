@@ -18,7 +18,7 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import * as LlmRetry from '@deepseek-ai/dsh-llm-retry'
-import { createUserMessage, ToolCallId, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, ToolCallId, ReasoningEffortId, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import BasicCompaction from '@deepseek-ai/dsh-compaction-basic'
@@ -3126,6 +3126,74 @@ describe('model-like text delegation', () => {
 const providerQuota = (): StreamChunk[] => [{ type: 'finish', reason: { kind: 'error', failure: {
   code: 'QUOTA', message: 'Private account message must not enter the status UI', providerRetryAfterMs: 1000,
 } } }]
+
+describe('model-like cache keepalive route changes', () => {
+  it.each(['route', 'epoch'] as const)('rejects a stale prefix when the effective %s changes', async change => {
+    const clock = new ManualKeepaliveClock()
+    const { parent, coordinator, adapter, taskId, store } = await setup(
+      [delegate(false), textResponse('Worker started.')], ['hang'],
+      { modelLike: true, clock, keepalive: { lead: true, worker: false }, auxiliaryScript: [textResponse('OK')] })
+    vi.spyOn(coordinator.options, 'reserveRequest').mockImplementation(() => undefined)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+    await waitForNative(() => expect(adapter.requests.filter(request => request.model === 'worker')).toHaveLength(1))
+    expect(keepaliveRecords(store).some(row => row.state === 'scheduled')).toBe(true)
+    const binding = coordinator.bindings.read(parent.id)!.binding
+    const { revision, ...control } = readModelControl(store, binding)!
+    // Simulate a queued timer surviving a route change, or switching away and back
+    // to the same model before that timer fires. The epoch must reject both cases.
+    store.writeDocument(`model-control:${parent.id}`, revision, {
+      ...control,
+      ...(change === 'route' ? { routes: { ...control.routes, lead: { provider: 'test-native', model: 'replacement' } } }
+        : { epoch: control.epoch + 2 }),
+    })
+    clock.advance(KEEPALIVE_INTERVAL_MS)
+    await waitForNative(() => expect(keepaliveRecords(store).some(row => row.stopReason === 'inactive')).toBe(true))
+    expect(adapter.requests.filter(request => request.maxTokens === 1)).toHaveLength(0)
+    expect(nativeUsage(store).filter(row => row.purpose === 'cache-keepalive')).toHaveLength(0)
+    expect(coordinator.state(taskId).control.mode).toBe('running')
+  })
+
+  it.each([
+    { name: 'unchanged route', model: 'lead' },
+    { name: 'replacement model', model: 'replacement' },
+    { name: 'changed reasoning effort', model: 'lead', reasoningEffort: 'high' },
+  ])('keeps the current prefix alive after continuing with $name', async ({ model, reasoningEffort }) => {
+    const clock = new ManualKeepaliveClock()
+    const { parent, coordinator, adapter, taskId, store } = await setup(
+      [providerQuota(), delegate(false), textResponse('Worker started.')], ['hang'],
+      { modelLike: true, clock, keepalive: { lead: true, worker: false }, auxiliaryScript: [textResponse('OK')] })
+    // Model-like execution uses native account limits, without a fixed output reservation.
+    // All responses here come from the in-process mock adapter.
+    vi.spyOn(coordinator.options, 'reserveRequest').mockImplementation(() => undefined)
+    const resolveModel = adapter.resolveModel.bind(adapter)
+    vi.spyOn(adapter, 'resolveModel').mockImplementation(async (provider, id) => ({
+      ...await resolveModel(provider, id),
+      reasoning: { efforts: [{ id: ReasoningEffortId('high'), name: 'High' }] },
+    }))
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+    const binding = coordinator.bindings.read(parent.id)!.binding
+    const revision = readFusionStatus(store, parent.id).task!.modelControl!.revision
+    await coordinator.modelControl.continue(parent.id, taskId, revision, {
+      role: 'lead', route: { provider: 'test-native', model, ...(reasoningEffort ? { reasoningEffort } : {}) },
+    })
+    await parent.whenIdle()
+    await waitForNative(() => expect(adapter.requests.filter(request => request.model === 'worker')).toHaveLength(1))
+    const current = adapter.requests.filter(request => request.model !== 'worker').at(-1)!
+    expect(current).toMatchObject({ model })
+    expect(current.reasoningEffort).toBe(reasoningEffort)
+    expect(coordinator.bindings.read(parent.id)!.binding.profile.digest).toBe(binding.profile.digest)
+    expect(keepaliveRecords(store).some(row => row.role === 'lead' && row.state === 'scheduled')).toBe(true)
+    clock.advance(KEEPALIVE_INTERVAL_MS)
+    await waitForNative(() => expect(nativeUsage(store).some(row => row.purpose === 'cache-keepalive' && row.outcome === 'stop')).toBe(true))
+    const ping = adapter.requests.at(-1)!
+    expect(ping).toMatchObject({ model, maxTokens: 1 })
+    expect(ping.reasoningEffort).toBe(reasoningEffort)
+    expect(ping.messages.slice(0, -1)).toEqual(current.messages)
+    expect(adapter.requests.filter(request => request.maxTokens === 1)).toHaveLength(1)
+  })
+})
 
 describe('model-like local continuation', () => {
   it('records canonical Lead QUOTA without a reset time and wakes once through the native inbox', async () => {
