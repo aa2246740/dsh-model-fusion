@@ -40,6 +40,8 @@ const systemClock: KeepaliveClock = {
 type Owner = { binding: SessionBinding; role: Role }
 interface Callbacks {
   owner(agent: Agent): Owner | undefined
+  /** Effective route and its generation; a frozen profile does not follow model switches. */
+  routeKey?(owner: Owner): string
   allowed(agent: Agent, owner: Owner): boolean
   failed(agent: Agent, reason: string): void
   /** Per-model mode and interval (user setting, learned, defaults); absent: the pair profile and a fixed interval. */
@@ -65,6 +67,7 @@ export interface KeepaliveRecord {
 interface Series {
   agent: Agent
   owner: Owner
+  routeKey?: string
   input: GenerateOptions
   started: number
   controller: AbortController
@@ -98,6 +101,7 @@ export class NativeCacheKeepalive {
     const current = this.callbacks.owner(row.agent)
     return Boolean(current?.binding.selected && current.binding.taskId === row.owner.binding.taskId
       && current.binding.profile.digest === row.owner.binding.profile.digest && current.role === row.owner.role
+      && this.callbacks.routeKey?.(current) === row.routeKey
       && this.#policy(current, row.input.provider, row.input.model).mode !== 'off' && this.callbacks.allowed(row.agent, current))
   }
 
@@ -244,7 +248,7 @@ export class NativeCacheKeepalive {
       const input: GenerateOptions = structuredClone({ provider: request.provider, model: request.model,
         messages: request.messages, tools: request.tools, system: request.system, temperature: request.temperature,
         reasoningEffort: request.reasoningEffort, stop: request.stop, sessionId: request.sessionId })
-      const row: Series = { agent, owner, input, started: manager.clock.now(), controller: new AbortController(), revision: 0, intervalMs: policy.intervalMs,
+      const row: Series = { agent, owner, input, routeKey: manager.callbacks.routeKey?.(owner), started: manager.clock.now(), controller: new AbortController(), revision: 0, intervalMs: policy.intervalMs,
         record: { schemaVersion: 1, id: randomUUID(), taskId: owner.binding.taskId, sessionId: agent.id, role: owner.role,
           profileDigest: owner.binding.profile.digest, inputDigest: digestOf(input), createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(), state: 'generating', attempts: 0, successes: 0 } }

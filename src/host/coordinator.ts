@@ -371,9 +371,12 @@ export class FusionCoordinator {
     }))
     this.cachePolicy = new CachePolicy(store)
     this.keepalive = new NativeCacheKeepalive(ctx, store, this.#auxiliary, {
+      routeKey: owner => digestOf({
+        route: this.modelControl?.route(owner.binding, owner.role) ?? owner.binding.profile[owner.role],
+        epoch: readModelControl(store, owner.binding)?.epoch ?? 0,
+      }),
       owner: agent => this.owner(agent), allowed: (agent, owner) => {
         const state = this.state(owner.binding.taskId)
-        if (digestOf(this.modelControl?.route(owner.binding, owner.role) ?? owner.binding.profile[owner.role]) !== digestOf(owner.binding.profile[owner.role])) return false
         try { if (state.control.mode !== 'running' || this.#requestBlocked(agent, owner.binding, owner.role)) return false }
         catch (error) { if (error instanceof StatusPending) return false; throw error }
         if (agent.status === 'running') return true
