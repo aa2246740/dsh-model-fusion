@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { TokenUsage } from '@deepseek-ai/dsh-llm';
-import type { Role, TaskId } from '../contracts.js';
+import type { PhysicalRoute, Role, TaskId } from '../contracts.js';
 import type { CanonicalBill, UsageLedgerV2 } from '../usage/ledger.js';
 import type { SqliteFusionStore } from '../task/sqlite-store.js';
 import type { NativeAuxiliaryRequests } from './native-auxiliary.js';
@@ -43,4 +43,4 @@ export interface NativeUsageRecord {
     apiEquivalentCostUsd: null;
 }
 /** Read-only stream observer. It neither changes requests nor orchestrates agents. */
-export declare function observeNativeUsage(ctx: Context, store: SqliteFusionStore, ownerOf: (agent: Agent) => UsageOwner | undefined, auxiliary?: NativeAuxiliaryRequests): () => void;
+export declare function observeNativeUsage(ctx: Context, store: SqliteFusionStore, ownerOf: (agent: Agent) => UsageOwner | undefined, auxiliary?: NativeAuxiliaryRequests, routeOf?: (agent: Agent, owner: UsageOwner) => PhysicalRoute | undefined): () => void;

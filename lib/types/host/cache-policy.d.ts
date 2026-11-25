@@ -106,7 +106,7 @@ export declare function cacheView(policy: CachePolicy, pair?: {
     role: Role | undefined;
     mode: CacheMode;
     intervalSeconds: number;
-    modeSource: "user" | "role" | "route" | "family" | "generic" | "pair";
+    modeSource: "user" | "route" | "role" | "family" | "generic" | "pair";
     intervalSource: "user" | "route" | "family" | "generic" | "learned";
     setting: ModelCacheSetting;
     defaults: {

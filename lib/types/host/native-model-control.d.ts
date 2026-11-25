@@ -55,6 +55,8 @@ interface Callbacks {
     settled(binding: SessionBinding): boolean;
     stopAuxiliary(binding: SessionBinding): void;
 }
+/** True when a provider failure code explicitly indicates exhausted account/API quota. */
+export declare function isQuotaFailureCode(code: string | undefined): boolean;
 /** Durable local controls. No provider polling, synthetic user identity, or silent routing fallback. */
 export declare class NativeModelControl {
     #private;

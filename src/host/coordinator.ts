@@ -2,15 +2,16 @@ import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-compaction'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { NativeWorkerNotices } from './native-worker-notices.js'
 import { SessionId as NativeSessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { ExplorationReport, FusionEvent, Role, TaskId, WorkerReport, WorkOrder } from '../contracts.js'
+import type { ExplorationReport, FusionEvent, PhysicalRoute, Role, TaskId, WorkerReport, WorkOrder } from '../contracts.js'
 import { EpochId, OperationId, SessionId, SnapshotId, TaskId as asTaskId, WorkOrderId } from '../contracts.js'
 import { digestOf } from '../digest.js'
+import { isGoalInstructionSource, isInstructionSource } from '../message-source.js'
 import { WorkspaceWriteLease } from '../execution/write-lease.js'
 import type { LeaseRecord } from '../execution/write-lease.js'
 import type { ResolvedProfile } from '../profile/resolve.js'
@@ -27,7 +28,7 @@ import type { CheckDefinition, FrozenCheck } from './native-checks.js'
 import { captureNativeReviewRequest, nativeReviewProof } from './native-review.js'
 import { NativeFusionScopes } from './native-scopes.js'
 import { NativeContextGuard } from './native-context.js'
-import { NativeModelControl, readModelControl } from './native-model-control.js'
+import { isQuotaFailureCode, NativeModelControl, readModelControl } from './native-model-control.js'
 import { installCompactionRouting } from './compaction-routing.js'
 import { adaptiveWorkflow, enforcedWorkflow, NativeWorkflow } from './native-workflow.js'
 import { NativeRoleSandbox, roleSeparated } from './native-role-sandbox.js'
@@ -41,7 +42,7 @@ import { observeNativeUsage } from './native-usage.js'
 import { NativeAuxiliaryRequests } from './native-auxiliary.js'
 import { NativeCacheKeepalive } from './native-keepalive.js'
 import type { KeepaliveClock } from './native-keepalive.js'
-import { hasStartActivation } from './subagent-seam.js'
+import { FusionCatalogAdapter, FUSION_MODEL, FUSION_PROVIDER, installFusionRequestCapture, isFusionSelection } from './native-selection.js'
 import { NativeWorkerTransport } from './native-worker.js'
 import { NativeFusionActivity } from './native-activity.js'
 import { captureExploration, citedEvidenceChanged, scopeDirectoryEmpty } from './native-exploration.js'
@@ -65,6 +66,8 @@ const isRead = (exec: Readonly<ToolExecution>) => READ_TOOLS.has(exec.name)
   || exec.name === 'str_replace_editor' && (exec.arguments as { command?: unknown }).command === 'view'
 const FUSION_TOOLS = new Set(['fusion_read_state', 'fusion_delegate_text', 'fusion_explore', 'fusion_delegate', 'fusion_rework', 'fusion_wait', 'fusion_review_result', 'fusion_submit_result', 'fusion_takeover', 'fusion_finish_direct', 'fusion_read_evidence'])
 const WORKER_FUSION_TOOLS = new Set(['fusion_submit_result', 'fusion_read_state', 'fusion_read_evidence'])
+/** Native Goal tools belong to the top-level Lead only, never the Sidekick. */
+const GOAL_TOOLS = new Set(['get_goal', 'create_goal', 'update_goal'])
 export interface CoordinatorOptions {
   profile: ResolvedProfile
   workerTools: readonly string[]
@@ -79,6 +82,8 @@ export interface CoordinatorOptions {
   commandMaxSeconds?: number
   /** Test clock only; production retains the recovered fixed schedule. */
   keepaliveClock?: KeepaliveClock
+  /** Auto-register FusionCatalogAdapter when the host has not mounted one yet (default true). */
+  registerAdapter?: boolean
 }
 interface RuntimeRecord {
   schemaVersion: 1
@@ -275,7 +280,7 @@ export function directTurnLeavesWorkOpen(userTexts: readonly string[], assistant
 export const literalSpans = (text: string) => [...new Set([...text.matchAll(/`([^`\n]{2,120})`/g)].map(match => match[1]!))]
 
 /** The enforced-v3 Lead's fixed catalog (order is part of the cached prompt prefix). */
-const SEPARATED_LEAD_TOOLS: readonly string[] = [...new Set([...READ_TOOLS, nativeShellTool, ...[...FUSION_TOOLS].filter(name =>
+const SEPARATED_LEAD_TOOLS: readonly string[] = [...new Set([...READ_TOOLS, nativeShellTool, ...GOAL_TOOLS, ...[...FUSION_TOOLS].filter(name =>
   !['fusion_takeover', 'fusion_submit_result', 'fusion_finish_direct'].includes(name))])]
 
 /** Test files by common conventions (Python, JS/TS, Go, Rust and generic test directories). */
@@ -309,6 +314,18 @@ export const ESCALATE_AFTER_REWORKS = 2
 /** Lead takeover submissions allowed per escalated work order. */
 export const MAX_LEAD_SUBMISSIONS = 3
 
+/**
+ * Shared auto-registered `FusionCatalogAdapter` slot per host `Context`.
+ * Allows overlapping coordinator generations (e.g. HMR or replacement while an
+ * earlier instance is draining `close()`) to hand over `dsh-model-fusion/auto`
+ * without dropping the adapter or triggering a duplicate-provider error.
+ */
+const sharedAdapters = new WeakMap<Context, {
+  current: FusionCoordinator | undefined
+  readonly refs: Set<FusionCoordinator>
+  readonly dispose: () => void
+}>()
+
 /** Native AgentLoop owns work; optional auxiliary calls use the public LLM service. */
 export class FusionCoordinator {
   readonly bindings: BindingRepository
@@ -333,6 +350,8 @@ export class FusionCoordinator {
   readonly #leadMutations = new Map<TaskId, symbol>()
   readonly #stoppingTasks = new Map<TaskId, number>()
   readonly #backgroundStops = new Map<TaskId, Promise<void>>()
+  readonly #priorSelection = new Map<string, Readonly<ModelSelection>>()
+  readonly #leadDispatchedRoute = new Map<string, PhysicalRoute>()
   readonly #statusAbort = new AbortController()
   #closing = false
 
@@ -384,22 +403,15 @@ export class FusionCoordinator {
           catch (error) { this.#trackingFailed(agent, `Worker brief tracking failed: ${String(error)}`); throw error }
         }
       },
-      installTools: (scope, agent, _binding, role) => this.#tools(scope, agent, role),
+      installTools: (scope, agent, _binding, role, isAllowed) => this.#tools(scope, agent, role, isAllowed),
       readOnlyTools: (agent, binding, role) => {
         const state = this.state(binding.taskId)
         // enforced-v3 keeps its fixed catalog (prompt cache); the guard refuses tools on a completed task.
-        if (role === 'lead' && adaptiveWorkflow(binding) && state.control.mode === 'completed' && !roleSeparated(binding)) return []
+        if (role === 'lead' && adaptiveWorkflow(binding) && state.control.mode === 'completed' && !roleSeparated(binding)) return [...GOAL_TOOLS]
         if (role === 'worker') {
           if (state.currentWorkOrder?.mode === 'text') return []
           if (state.currentWorkOrder?.mode === 'explore') return this.options.workerTools.filter(name => READ_TOOLS.has(name))
-          // Implement mode. 0.2.0 keeps `undefined`: `startContinuable` still
-          // sends `toolFilter`, and returning an array here would also call
-          // `presentAs('native')` in NativeFusionScopes. 0.2.1 has no start-time
-          // toolFilter, so the array is the ceiling. The scope is installed at
-          // `agent/created`, before the child's first request, and that array
-          // also presents the Worker natively, as the read-only modes already were.
-          // The deny-only guard stays the second gate on both hosts.
-          return hasStartActivation(this.ctx.subagents) ? [...this.options.workerTools] : undefined
+          return [...this.options.workerTools]
         }
         const lease = this.#held.get(binding.taskId)
         if (roleSeparated(binding)) return this.#leadWriter(binding, agent) ? undefined : this.#separatedLeadTools(state, binding)
@@ -407,7 +419,7 @@ export class FusionCoordinator {
           if (adaptiveWorkflow(binding) && !state.currentWorkOrder) return undefined
           const takeover = state.currentWorkOrder && this.#runtime(binding.taskId).takeover
           if (takeover && lease?.holder === SessionId(agent.id) && this.leases.stillHeld(lease)) return undefined
-          return [...READ_TOOLS, ...FUSION_TOOLS].filter(name => {
+          return [...READ_TOOLS, ...GOAL_TOOLS, ...FUSION_TOOLS].filter(name => {
             if (adaptiveWorkflow(binding) && state.currentWorkOrder) {
               // Do not offer new handoffs while this persistent Worker owns the
               // task. The delegate method remains the hard guard for forged calls.
@@ -424,9 +436,58 @@ export class FusionCoordinator {
         }
         if (binding.profile.interactionMode === 'model-like' && !state.currentWorkOrder) return undefined
         return state.control.mode === 'running' && lease?.holder === SessionId(agent.id) && this.leases.stillHeld(lease)
-          ? undefined : [...READ_TOOLS, ...FUSION_TOOLS]
+          ? undefined : [...READ_TOOLS, ...GOAL_TOOLS, ...FUSION_TOOLS]
       },
     })
+    this.#dispose.push(installFusionRequestCapture(ctx))
+    if (options.registerAdapter !== false) {
+      const existing = sharedAdapters.get(ctx)
+      if (existing) {
+        existing.refs.add(this)
+        existing.current = this
+        this.#dispose.push(() => {
+          existing.refs.delete(this)
+          if (existing.refs.size === 0) {
+            existing.current = undefined
+            sharedAdapters.delete(ctx)
+            existing.dispose()
+          } else if (existing.current === this) {
+            existing.current = [...existing.refs].at(-1)
+          }
+        })
+      } else if (!ctx.llm.listProviders().some(provider => provider.id === FUSION_PROVIDER)) {
+        const slot: { current: FusionCoordinator | undefined; readonly refs: Set<FusionCoordinator>; dispose: () => void } = {
+          current: this,
+          refs: new Set([this]),
+          dispose: () => {},
+        }
+        slot.dispose = ctx.llm.registerAdapter([FUSION_PROVIDER], new FusionCatalogAdapter({
+          ctx, coordinator: () => slot.current,
+        }))
+        sharedAdapters.set(ctx, slot)
+        this.#dispose.push(() => {
+          slot.refs.delete(this)
+          if (slot.refs.size === 0) {
+            slot.current = undefined
+            sharedAdapters.delete(ctx)
+            slot.dispose()
+          } else if (slot.current === this) {
+            slot.current = [...slot.refs].at(-1)
+          }
+        })
+      }
+    }
+    this.#dispose.push(ctx.on('session/event', (session, event) => {
+      if (event.type !== 'assistant/message') return
+      const source = event.data.message.source
+      if (source.provider !== FUSION_PROVIDER || source.replayState === undefined) return
+      const binding = this.bindings.read(session.id)?.binding
+      if (!binding?.selected) return
+      const route = this.#leadDispatchedRoute.get(session.id) ?? this.modelControl?.route(binding, 'lead') ?? binding.profile.lead
+      const key = `lead-msg-route:${session.id}:${event.data.message.id}`
+      const prior = store.readDocument(key)
+      store.writeDocument(key, prior?.revision ?? 0, { provider: route.provider, model: route.model })
+    }))
     this.approvals = new NativeApprovals(ctx, store, { owner: agent => this.owner(agent),
       state: id => this.state(id),
       pending: (id, approval) => { this.append(id, 'approval/pending', { approval }) },
@@ -435,7 +496,8 @@ export class FusionCoordinator {
     this.#dispose.push(this.approvals.install())
     this.#dispose.push(this.roleSandbox.install())
     this.effects = new NativeEffects(ctx, store, { owner: agent => this.owner(agent),
-      track: exec => !isRead(exec) && !FUSION_TOOLS.has(exec.name),
+      track: exec => !isRead(exec) && !FUSION_TOOLS.has(exec.name)
+        && !(exec.agent && this.owner(exec.agent)?.role === 'lead' && GOAL_TOOLS.has(exec.name)),
       backgroundMaxMs: (_exec, binding) => binding.profile.interactionMode === 'model-like' ? null : (this.state(binding.taskId).currentWorkOrder?.policy.commandMaxSeconds ?? this.options.commandMaxSeconds ?? DEFAULT_POLICY.commandMaxSeconds) * 1000,
       failed: (agent, error) => this.#trackingFailed(agent, `Fusion native effect tracking failed: ${String(error)}`) })
     this.#dispose.push(this.effects.install())
@@ -461,7 +523,7 @@ export class FusionCoordinator {
       const cwd = exec.agent.session.header.cwd
       return workspaceWriterDenial({
         fusionOwned: true,
-        exempt: isRead(exec) || FUSION_TOOLS.has(exec.name) || exec.name === 'run_code',
+        exempt: isRead(exec) || FUSION_TOOLS.has(exec.name) || (owner.role === 'lead' && GOAL_TOOLS.has(exec.name)) || exec.name === 'run_code',
         cwd,
         leaseHolder: cwd ? this.leases.current(cwd)?.holder : undefined,
         agentId: SessionId(exec.agent.id),
@@ -469,6 +531,7 @@ export class FusionCoordinator {
     }))
     this.cachePolicy = new CachePolicy(store)
     this.keepalive = new NativeCacheKeepalive(ctx, store, this.#auxiliary, {
+      route: owner => this.modelControl?.route(owner.binding, owner.role) ?? owner.binding.profile[owner.role],
       routeKey: owner => digestOf({
         route: this.modelControl?.route(owner.binding, owner.role) ?? owner.binding.profile[owner.role],
         epoch: readModelControl(store, owner.binding)?.epoch ?? 0,
@@ -493,7 +556,10 @@ export class FusionCoordinator {
     this.#dispose.push(observeNativeUsage(ctx, store, agent => {
       const owner = this.owner(agent)
       return owner ? { taskId: owner.binding.taskId, role: owner.role } : undefined
-    }, this.#auxiliary))
+    }, this.#auxiliary, (agent, owner) => {
+      const bound = this.owner(agent)
+      return bound ? (this.modelControl?.route(bound.binding, owner.role) ?? bound.binding.profile[owner.role]) : undefined
+    }))
     const context = new NativeContextGuard(ctx, store, agent => this.owner(agent), (owner, reason) => {
       if (this.state(owner.binding.taskId).control.mode === 'running') this.append(owner.binding.taskId, 'task/paused', { reason })
     }, this.taskContext, this.#auxiliary, (binding, role) => this.modelControl.route(binding, role))
@@ -556,7 +622,7 @@ export class FusionCoordinator {
       if (message) agent.session.append('user/message', message, { surfaceOp: 'append' })
     }))
     this.#dispose.push(ctx.on('session/event', (session, event) => {
-      if (event.type !== 'user/message' || event.data.source && event.data.source.kind !== 'user') return
+      if (event.type !== 'user/message' || !isInstructionSource(event.data.source)) return
       const binding = this.bindings.read(session.id)?.binding
       if (!binding?.selected) return
       const id = `task-index:${binding.taskId}`, row = store.readDocument(id)
@@ -649,6 +715,19 @@ export class FusionCoordinator {
     })
   }
 
+  /** Record the physical Lead route immediately before FusionCatalogAdapter dispatches a stream. */
+  recordLeadDispatch(sessionId: string, route: PhysicalRoute): void {
+    this.#leadDispatchedRoute.set(sessionId, route)
+  }
+
+  /** Return the persisted physical Lead route that produced one virtual-provider assistant message. */
+  leadMessageRoute(sessionId: string, messageId: string): PhysicalRoute | undefined {
+    const row = this.store.readDocument(`lead-msg-route:${sessionId}:${messageId}`)?.value as Partial<PhysicalRoute> | undefined
+    return row && typeof row.provider === 'string' && typeof row.model === 'string'
+      ? { provider: row.provider, model: row.model }
+      : undefined
+  }
+
   /** Only at idle selection or native running reservation, before prompt assembly. */
   selectBeforeAssembly(agent: Agent, resolved: ResolvedProfile): void {
     if (agent.session.header.parentSession) throw new Error('Fusion requires a top-level session')
@@ -659,6 +738,11 @@ export class FusionCoordinator {
     const binding = this.bindings.select(agent.id, taskId, resolved)
     this.modelControl.reset(binding)
     this.scopes.install(agent, binding, 'lead')
+    const current = agent.model.current()
+    if (!isFusionSelection(current)) {
+      if (current) this.#priorSelection.set(agent.id, current)
+      agent.model.select({ provider: FUSION_PROVIDER, model: FUSION_MODEL })
+    }
   }
 
   #createTask(agent: Agent, taskId: TaskId, resolved: ResolvedProfile, firstSeq?: number): void {
@@ -670,15 +754,19 @@ export class FusionCoordinator {
   }
 
   /**
-   * A bare "Continue" starts a new task after the previous one completed, but the
-   * user's original words are still the requirement source. Anything else keeps
-   * the new task's own boundary.
+   * A bare "Continue" or an automatic Goal round (`source.kind === 'goal'`)
+   * starts a new task after the previous one completed, while the user's
+   * original words remain the requirement source. Anything else keeps the
+   * new task's own boundary.
    */
   #carriedContinuationSeq(agent: Agent, previousTaskId: TaskId): number | undefined {
     const pending = agent.inbox.nextTurn[0]
-    if (!pending || (pending.source && pending.source.kind !== 'user')) return undefined
-    const text = pending.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
-    if (!isBareContinuation(text)) return undefined
+    if (!pending) return undefined
+    if (!isGoalInstructionSource(pending.source)) {
+      if (pending.source && pending.source.kind !== 'user') return undefined
+      const text = pending.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+      if (!isBareContinuation(text)) return undefined
+    }
     const origin = this.store.readDocument(`task-origin:${previousTaskId}`)?.value as { firstSeq?: unknown } | undefined
     if (typeof origin?.firstSeq === 'number' && Number.isSafeInteger(origin.firstSeq) && origin.firstSeq >= 0 && origin.firstSeq <= agent.session.seq) {
       return origin.firstSeq
@@ -690,12 +778,21 @@ export class FusionCoordinator {
   #directTurnLeavesWorkOpen(agent: Agent, taskId: TaskId): boolean {
     const origin = this.store.readDocument(`task-origin:${taskId}`)?.value as { firstSeq?: unknown } | undefined
     const firstSeq = typeof origin?.firstSeq === 'number' ? origin.firstSeq : 0
-    const userTexts = agent.session.snapshotEvents().flatMap(event => {
+    const events = agent.session.snapshotEvents()
+    // A Goal wrap-up round that inspected prior work and transitioned the Goal
+    // out of 'active' (complete/paused/blocked) has no remaining unexecuted work.
+    const lastInstruction = events.findLast(event => event.seq >= firstSeq && event.type === 'user/message' && isInstructionSource(event.data.source))
+    if (lastInstruction?.type === 'user/message' && isGoalInstructionSource(lastInstruction.data.source)) {
+      const goals = this.ctx.get('goals' as never) as { get?(target: Agent): { phase?: string } | undefined } | undefined
+      const phase = goals?.get?.(agent)?.phase
+      if (phase && phase !== 'active') return false
+    }
+    const userTexts = events.flatMap(event => {
       if (event.seq < firstSeq || event.type !== 'user/message') return []
-      if (event.data.source && event.data.source.kind !== 'user') return []
+      if (!isInstructionSource(event.data.source)) return []
       return event.data.content.flatMap(block => block.type === 'text' ? [block.text] : [])
     })
-    const reply = agent.session.snapshotEvents().findLast(event => event.type === 'assistant/message')
+    const reply = events.findLast(event => event.type === 'assistant/message')
     const assistantText = reply && reply.type === 'assistant/message'
       ? reply.data.message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
       : ''
@@ -720,6 +817,18 @@ export class FusionCoordinator {
       this.#release(binding.taskId)
       this.scopes.detach(agent)
       this.bindings.clear(agent.id)
+      if (isFusionSelection(agent.model.current())) {
+        const prior = this.#priorSelection.get(agent.id)
+          ?? (agent.options.provider && agent.options.model && !isFusionSelection(agent.options)
+            ? {
+              provider: agent.options.provider,
+              model: agent.options.model,
+              ...(agent.options.reasoningEffort === undefined ? {} : { reasoningEffort: agent.options.reasoningEffort }),
+            }
+            : undefined)
+        if (prior) agent.model.select(prior)
+      }
+      this.#priorSelection.delete(agent.id)
       if (roleSeparated(binding)) this.roleSandbox.restore(agent)
     })
   }
@@ -832,7 +941,7 @@ export class FusionCoordinator {
     // quota/billing exhaustion closes automatic continuation. Do not project raw
     // upstream text (which may contain account details) into another model.
     const code = error.code && /^[A-Z0-9_-]{1,64}$/i.test(error.code) ? error.code : undefined
-    const quota = ['QUOTA', 'INSUFFICIENT_QUOTA', 'BILLING_HARD_LIMIT_REACHED'].includes(code?.toUpperCase() ?? '')
+    const quota = isQuotaFailureCode(code)
       || code === 'RATE_LIMIT' && /insufficient_quota|billing_hard_limit_reached|\bquota\s+(?:exceeded|exhausted)\b|Token Plan 用量上限/i.test(error.message)
     this.#saveRuntime({ ...runtime, workerFailure: { workOrderId: state.currentWorkOrder.id, childId: child.id,
       eventSeq: end.seq, userSeq: this.#latestUserSeq(agent), category: quota ? 'quota-exhausted' : 'provider-error', ...(code ? { code } : {}) } })
@@ -876,7 +985,7 @@ export class FusionCoordinator {
       const issue = this.effects.jobProblem(exec, binding.taskId)
       if (issue) return issue
     }
-    if (state.control.mode === 'completed') return 'This task is completed; begin a new task before using tools'
+    if (state.control.mode === 'completed' && !(role === 'lead' && GOAL_TOOLS.has(exec.name))) return 'This task is completed; begin a new task before using tools'
     if (role === 'lead' && ['fusion_delegate', 'fusion_delegate_text', 'fusion_explore', 'fusion_rework', 'fusion_takeover'].includes(exec.name) && this.modelControl.waiting(binding, 'worker')
       // A Worker that stopped without its report, looped, or hit an unclassified error can be redirected by the
       // Lead with a new instruction (bounded); quota and credential stops still need the user.
@@ -906,14 +1015,18 @@ export class FusionCoordinator {
       const separated = this.#separatedLeadGuard(exec, binding)
       if (separated !== false) return separated
     }
-    if (enforcedWorkflow(binding) && role === 'lead' && !isRead(exec) && !FUSION_TOOLS.has(exec.name)
+    if (role === 'lead' && exec.name === 'fusion_takeover' && enforcedWorkflow(binding) && !roleSeparated(binding)
+      && (!state.currentWorkOrder || state.reviewResult?.decision !== 'rework')) {
+      return 'FUSION_TAKEOVER_REQUIRES_REWORK: delegate first, inspect the current report and record a rework review before taking over'
+    }
+    if (enforcedWorkflow(binding) && role === 'lead' && !isRead(exec) && !FUSION_TOOLS.has(exec.name) && !GOAL_TOOLS.has(exec.name)
       && (!adaptiveWorkflow(binding) || state.currentWorkOrder)) {
       const nested = this.#nestedChecks.get(exec.callId)
       const check = isShellTool(exec.name) && nested?.agent === exec.agent && nested.parent === exec.parent
       const takeover = state.currentWorkOrder && this.#runtime(binding.taskId).takeover
       if (!check && !takeover) return this.workflow.denyEffect(binding)
     }
-    if (isRead(exec) || FUSION_TOOLS.has(exec.name) || exec.name === 'run_code') return undefined
+    if (isRead(exec) || FUSION_TOOLS.has(exec.name) || (role === 'lead' && GOAL_TOOLS.has(exec.name)) || exec.name === 'run_code') return undefined
     if (binding.profile.interactionMode === 'model-like' && !enforcedWorkflow(binding) && role === 'lead') {
       const refused = this.#leadWriteBoundary(exec, binding)
       if (refused) return refused
@@ -1021,7 +1134,7 @@ export class FusionCoordinator {
     if (exec.name === 'fusion_submit_result' || exec.name === 'fusion_finish_direct') {
       return 'FUSION_LEAD_READ_ONLY: in this Fusion mode the Lead never writes. Send corrections to the same Sidekick with fusion_rework.'
     }
-    if (isRead(exec) || FUSION_TOOLS.has(exec.name)) return false
+    if (isRead(exec) || FUSION_TOOLS.has(exec.name) || GOAL_TOOLS.has(exec.name)) return false
     const nested = this.#nestedChecks.get(exec.callId)
     if (isShellTool(exec.name) && nested && nested.agent === exec.agent && nested.parent === exec.parent) return false
     if (isShellTool(exec.name) && (exec.arguments as { run_in_background?: unknown }).run_in_background === true) {
@@ -1082,6 +1195,13 @@ export class FusionCoordinator {
   #saveRuntime(row: RuntimeRecord): void {
     const key = `runtime:${row.taskId}`, prior = this.store.readDocument(key)
     this.store.writeDocument(key, prior?.revision ?? 0, row)
+    const state = this.store.load(row.taskId)
+    if (!state) return
+    const parent = this.ctx.agents.get(NativeSessionId(state.parent))
+    if (parent && this.scopes.get(parent)?.binding.taskId === row.taskId) this.scopes.refreshTools(parent)
+    const childId = state.acceptedChild ?? state.reservedChild
+    const child = childId && this.ctx.agents.get(NativeSessionId(childId))
+    if (child && this.scopes.get(child)?.binding.taskId === row.taskId) this.scopes.refreshTools(child)
   }
 
   #binding(agent: Agent, role: Role): SessionBinding {
@@ -1277,11 +1397,11 @@ export class FusionCoordinator {
     for (const path of args.allowedPaths) workspacePath(base.root, path)
     const origin = this.store.readDocument(`task-origin:${binding.taskId}`)?.value as { firstSeq: number } | undefined
     const source = agent.session.snapshotEvents().findLast(event => event.seq >= (origin?.firstSeq ?? 0) && event.type === 'user/message'
-      && (event.data.source === undefined || event.data.source.kind === 'user'))
+      && isInstructionSource(event.data.source))
     if (!source || source.type !== 'user/message') throw new Error('No native user instruction source')
-    // The user's own words for this task (every user message since the task began).
+    // The user's or goal round's own words for this task (every instruction message since the task began).
     const userTexts = agent.session.snapshotEvents().filter(event => event.seq >= (origin?.firstSeq ?? 0)
-      && event.type === 'user/message' && (event.data.source === undefined || event.data.source.kind === 'user'))
+      && event.type === 'user/message' && isInstructionSource(event.data.source))
       .flatMap(event => event.type === 'user/message' ? event.data.content.filter(block => block.type === 'text').map(block => block.text) : [])
     const requirements = this.#requirements(binding, mode, args.requirements, userTexts)
     const order: WorkOrder = {
@@ -1362,6 +1482,7 @@ export class FusionCoordinator {
     try {
       this.store.advanceOutbox(binding.taskId, order.operationId, 'prepared', 'dispatched')
       this.activity.link(agent.session, childId, binding.taskId, exec.callId)
+      if (resident) this.scopes.syncModel(resident)
       const accepted = binding.workerId
         ? await this.transport.continue(agent, childId, brief, exec.signal)
         : await this.transport.start(agent, { childId, brief, label: args.goal.slice(0, 100),
@@ -1540,6 +1661,7 @@ export class FusionCoordinator {
         reworkRounds: runtime.reworkRounds + (feedbackKind === 'rework' ? 1 : 0),
         continuationRounds: continuationRounds + (feedbackKind === 'continuation' ? 1 : 0) })
       this.activity.link(agent.session, childId, binding.taskId, exec.callId)
+      if (child) this.scopes.syncModel(child)
       const accepted = delivery === 'interrupt-generation'
         ? await this.transport.interruptAndContinue(agent, state.acceptedChild, feedback, exec.signal)
         : await this.transport.continue(agent, state.acceptedChild, feedback, exec.signal)
@@ -1807,6 +1929,9 @@ export class FusionCoordinator {
       if (state.control.budgetBlocked) this.append(binding.taskId, 'budget/unblocked', { authorizationId })
       if (this.state(binding.taskId).control.mode === 'paused') this.append(binding.taskId, 'task/resumed', { reason: 'User resumed the native Fusion task' })
       this.#clearWorkerFailure(binding.taskId)
+      const workerId = binding.workerId ?? state.acceptedChild
+      const child = workerId && this.ctx.agents.get(NativeSessionId(workerId))
+      if (child) this.scopes.syncModel(child)
     })
   }
 
@@ -1872,8 +1997,10 @@ export class FusionCoordinator {
     await agent.whenIdle()
   }
 
-  #tools(scope: Context, agent: Agent, role: Role): readonly (() => void)[] {
-    const dispose = [scope.tools.register(defineTool({ name: 'fusion_read_evidence', description: 'Read owned evidence, including check receipt IDs from report coverage. Receipts include the frozen check, actual result and stdout/stderr references. Change manifests contain complete patch and before/after content references. Follow nextOffset until null to read a long artifact; binary content is explicitly base64.',
+  #tools(scope: Context, agent: Agent, role: Role, isAllowed: (toolName: string) => boolean): readonly (() => void)[] {
+    const register = (definition: Parameters<Context['tools']['register']>[0]) =>
+      scope.tools.register(definition, { when: () => isAllowed(definition.name) })
+    const dispose = [register(defineTool({ name: 'fusion_read_evidence', description: 'Read owned evidence, including check receipt IDs from report coverage. Receipts include the frozen check, actual result and stdout/stderr references. Change manifests contain complete patch and before/after content references. Follow nextOffset until null to read a long artifact; binary content is explicitly base64.',
       parameters: { id: { type: 'string', required: true }, offset: { type: 'integer', description: 'Text offset in UTF-16 code units; use nextOffset from the previous page. Default 0.' },
         limit: { type: 'integer', description: 'Maximum page length, from 2 to 24000 UTF-16 code units. Default 24000.' } }, output: textOutput,
       execute: async args => {
@@ -1881,7 +2008,7 @@ export class FusionCoordinator {
         const bytes = readNativeEvidence(this.store, binding.taskId, args.id)
         return JSON.stringify({ id: args.id, ...evidencePage(bytes, args.offset, args.limit) })
       } }))]
-    dispose.push(scope.tools.register(defineTool({ name: 'fusion_submit_result', description: role === 'lead'
+    dispose.push(register(defineTool({ name: 'fusion_submit_result', description: role === 'lead'
       ? 'Lead use only after fusion_takeover: submit your own correction so the frozen checks run again. To judge a Sidekick report, use fusion_review_result instead.'
       : 'Submit the current work-order report and conclude this Worker turn. Read-only exploration requires 1–12 source ranges, unless the directory has no entries on disk and the summary states that the scope is empty. Hidden, gitignored and excluded entries still count, and the host checks again when the Lead collects or finishes the report. Implementation retains frozen checks and Lead review.',
         parameters: { summary: { type: 'string', description: 'Changes and findings; put nonblocking observations here. For an empty scope, state that the scope is empty (for example "the scope is empty" or "没有文件").', required: true }, status: { type: 'string', enum: ['completed', 'blocked', 'needs-decision'], required: true },
@@ -1914,13 +2041,13 @@ export class FusionCoordinator {
           exec.concludeTurn()
           return 'Report persisted. The Lead will review after this Worker becomes quiescent.'
         } })))
-    if (this.owner(agent)?.binding.profile.interactionMode === 'model-like') dispose.push(scope.tools.register(defineTool({
+    if (this.owner(agent)?.binding.profile.interactionMode === 'model-like') dispose.push(register(defineTool({
       name: 'fusion_read_state', description: 'Read this task from durable storage only when needed, especially after compaction. Follow nextOffset until null to restore constraints before effectful tools.',
       parameters: { offset: { type: 'integer' }, limit: { type: 'integer' } }, output: textOutput,
       execute: async (args) => JSON.stringify(this.onDemand.read(agent, this.#binding(agent, role), role, args.offset, args.limit)),
     })))
     if (role === 'worker') return dispose
-    dispose.push(scope.tools.register(defineTool({ name: 'fusion_takeover', description: this.owner(agent) && enforcedWorkflow(this.owner(agent)!.binding)
+    dispose.push(register(defineTool({ name: 'fusion_takeover', description: this.owner(agent) && enforcedWorkflow(this.owner(agent)!.binding)
       ? 'Acquire exclusive write ownership for a Lead correction only after the current implementation report and a recorded rework review. Preserve the frozen checks; submit the correction and review it again.'
       : 'Acquire exclusive write ownership for a small direct task, or for a Lead correction after the current Worker report. A delegated task keeps its frozen acceptance checks and review. Takeover is recorded separately from Worker implementation.',
       parameters: { reason: { type: 'string', required: true } }, output: textOutput,
@@ -1963,7 +2090,7 @@ export class FusionCoordinator {
         this.#acquire(binding, base.root, agent.id, OperationId(randomUUID()))
         return 'Lead owns the write lease. For an existing work order call fusion_submit_result after the correction. For direct work, fusion_delegate can transfer the lease after preparation; call fusion_finish_direct only when the entire user task is complete.'
       } })))
-    dispose.push(scope.tools.register(defineTool({ name: 'fusion_finish_direct', description: 'Complete the entire direct user task or an answered read-only exploration. This closes the task; it is not a lease-release helper before delegation. Never use for an implementation work order. This does not claim independently verified acceptance.',
+    dispose.push(register(defineTool({ name: 'fusion_finish_direct', description: 'Complete the entire direct user task or an answered read-only exploration. This closes the task; it is not a lease-release helper before delegation. Never use for an implementation work order. This does not claim independently verified acceptance.',
       parameters: {}, output: textOutput, execute: async () => {
         const binding = this.#binding(agent, 'lead'), state = this.state(binding.taskId)
         if (state.currentWorkOrder?.mode === 'explore' && state.exploration?.status !== 'completed') {
@@ -1992,11 +2119,11 @@ export class FusionCoordinator {
         this.append(binding.taskId, 'task/completed', { snapshot, verification: 'unverified' })
         return 'Direct task recorded; describe the checks you actually ran and any remaining uncertainty.'
       } })))
-    dispose.push(scope.tools.register(defineTool({ name: 'fusion_explore', description: 'Optionally ask the persistent Worker for read-only code exploration before you plan implementation. It returns source-backed findings without changing files or running commands. Later fusion_delegate continues the same Worker.',
+    dispose.push(register(defineTool({ name: 'fusion_explore', description: 'Optionally ask the persistent Worker for read-only code exploration before you plan implementation. It returns source-backed findings without changing files or running commands. Later fusion_delegate continues the same Worker.',
       parameters: { goal: { type: 'string', required: true }, brief: { type: 'string', required: true }, constraints: stringList,
         block: { type: 'boolean', description: 'Default true. False returns while exploration runs; use fusion_wait to collect findings.' } }, output: textOutput,
       execute: (args, exec) => this.delegate(agent, { ...args, allowedPaths: [], checks: [] }, exec, 'explore') })))
-    if (this.owner(agent)?.binding.profile.interactionMode === 'model-like') dispose.push(scope.tools.register(defineTool({
+    if (this.owner(agent)?.binding.profile.interactionMode === 'model-like') dispose.push(register(defineTool({
       name: 'fusion_delegate_text', description: 'Delegate writing, synthesis or analysis of supplied material to the persistent Sidekick. No workspace, test runner or external tools required. Include the complete relevant material and success criteria in the brief. Review the report before delivering.',
       parameters: { goal: { type: 'string', required: true }, brief: { type: 'string', required: true }, constraints: stringList, block: { type: 'boolean' } }, output: textOutput,
       execute: (args, exec) => this.delegate(agent, { ...args, allowedPaths: [], checks: [] }, exec, 'text'),
@@ -2013,7 +2140,7 @@ export class FusionCoordinator {
       definitionPaths: { ...optionalStringList, description: 'Existing acceptance files whose bytes must remain unchanged; default none. Do not list files the Worker will create or edit.' },
       baseline: { type: 'string', enum: ['no-new-failures'], description: `For a broad regression suite (${BASELINE_PARSERS.join(', ')}) that may already have unrelated failing tests: the Host runs it once on the untouched workspace and then requires no new failures. Omit for the tests this task must make pass.` },
     } } as const
-    dispose.push(scope.tools.register(defineTool({ name: 'fusion_delegate', description: 'Delegate a bounded implementation to an independent persistent Worker. After direct Lead preparation, validated delegation transfers the quiescent write lease without completing the task. By default wait for its report and native checks; block=false returns while the Worker runs.',
+    dispose.push(register(defineTool({ name: 'fusion_delegate', description: 'Delegate a bounded implementation to an independent persistent Worker. After direct Lead preparation, validated delegation transfers the quiescent write lease without completing the task. By default wait for its report and native checks; block=false returns while the Worker runs.',
       parameters: { goal: { type: 'string', description: 'The complete implementation outcome, including all planned stages.', required: true },
         brief: { type: 'string', description: 'The current stage plan. Put temporary deferrals and sequencing here; later feedback may advance this stage.', required: true },
         constraints: { ...optionalStringList, description: 'Default none. Only durable requirements that remain true across every planned implementation stage. Do not freeze a temporary deferral such as not implementing stage two yet.' },
@@ -2022,16 +2149,16 @@ export class FusionCoordinator {
         checks: { type: 'array', required: true, items: checkItem, description: 'Acceptance commands the Host runs after the Worker reports; [] for review-only work.' },
         requirements: { ...optionalStringList, description: 'The user\'s hard requirements as exact quotes of their messages (required behaviour, names, strings, formats, acceptance criteria), 1-20 items. The Host verifies each quote against the user\'s words, freezes them for the Sidekick, and your accept must give one verdict per item.' } }, output: textOutput,
       execute: (args, exec) => this.delegate(agent, { ...args, constraints: args.constraints ?? [], checks: normalizeChecks(args.checks), requirements: args.requirements ?? [] }, exec) })))
-    dispose.push(scope.tools.register(defineTool({ name: 'fusion_rework', description: 'Send specific Lead-authored feedback to the same persistent Worker, including advancing a planned implementation stage. Before a report this continues unfinished work within the Worker-step budget; after a report it consumes a rework round. Active generation and native job waits can be replaced without restarting a tracked job; an active foreground tool finishes before the new brief. Keep durable requirements unchanged. Do not suggest files outside the frozen allowed paths unless you add them with addAllowedPaths.',
+    dispose.push(register(defineTool({ name: 'fusion_rework', description: 'Send specific Lead-authored feedback to the same persistent Worker, including advancing a planned implementation stage. Before a report this continues unfinished work within the Worker-step budget; after a report it consumes a rework round. Active generation and native job waits can be replaced without restarting a tracked job; an active foreground tool finishes before the new brief. Keep durable requirements unchanged. Do not suggest files outside the frozen allowed paths unless you add them with addAllowedPaths.',
       // Orchestration includes human approval waits; leaf tools retain their
       // resource deadlines, but the wait itself must not expire.
       parameters: { feedback: { type: 'string', required: true }, block: { type: 'boolean', description: 'Default true. False returns after delivery; call fusion_wait for the report and checks.' },
         addAllowedPaths: { ...optionalStringList, description: 'After a Worker report, when the task needs changes outside the frozen allowedPaths (for example an existing test elsewhere that encodes the old behaviour): workspace-relative paths to add. Paths are only added; the change is recorded and consumes this rework round.' },
         checks: { type: 'array', items: checkItem, description: 'Omit to keep the frozen acceptance checks. Only when a frozen check itself is wrong (for example its interpreter does not exist on this host), pass the complete corrected set after the Worker report. Every existing definitionPath must stay protected; the amendment is recorded and consumes this rework round.' } }, output: textOutput,
       execute: (args, exec) => this.rework(agent, args.feedback, exec, args.block ?? true, args.checks && normalizeChecks(args.checks), args.addAllowedPaths) })))
-    dispose.push(scope.tools.register(defineTool({ name: 'fusion_wait', description: 'Wait for the background Worker to become quiescent. Exploration returns source findings for planning; implementation runs its frozen native checks. Call sequentially after a handoff or feedback.',
+    dispose.push(register(defineTool({ name: 'fusion_wait', description: 'Wait for the background Worker to become quiescent. Exploration returns source findings for planning; implementation runs its frozen native checks. Call sequentially after a handoff or feedback.',
       parameters: {}, output: textOutput, execute: (_args, exec) => this.wait(agent, exec) })))
-    dispose.push(scope.tools.register(defineTool({ name: 'fusion_review_result', description: 'Record a completed Lead review bound to the candidate this native request received. Accept requires passing evidence.',
+    dispose.push(register(defineTool({ name: 'fusion_review_result', description: 'Record a completed Lead review bound to the candidate this native request received. Accept requires passing evidence.',
       parameters: { decision: { type: 'string', enum: ['accept', 'rework', 'needs-decision'], required: true }, reason: { type: 'string', required: true },
         requirements: { type: 'array', description: 'Required to accept when the work order has user requirements: one verdict per requirement index.',
           items: { type: 'object', additionalProperties: false, properties: { index: { type: 'integer', required: true }, met: { type: 'boolean', required: true },

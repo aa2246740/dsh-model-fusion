@@ -23,6 +23,11 @@ hotReload:
     - src/context/guard.ts
     - src/task/sqlite-store.ts
     - lib/dsh-model-fusion.js
+    - lib/client.js
+    - src/message-source.ts
+    - src/host/native-selection.ts
+    - src/host/native-keepalive.ts
+    - src/host/subagent-seam.ts
     - src/host/history.ts
     - src/host/native-model-control.ts
     - src/host/native-workflow.ts

@@ -61,9 +61,9 @@ function runtimePackage(name) {
 const links = [...declared].map(([name, range]) => {
   const source = packages.get(name)
   const item = (source && builtEntry(source.path)) || runtimePackage(name)
-  // DSH admits 0.2.1-rc.* through includePrerelease. Plain semver would reject
-  // `>=0.2.0-rc.2 <0.2.2` for 0.2.1-rc.5. Cordis keeps plain semver so a
-  // prerelease such as 4.1.0-rc.1 still fails ^4.0.4.
+  // DSH admits 0.2.2-rc.* through includePrerelease while rejecting 0.2.3-alpha.*
+  // via the `<0.2.3-0` upper bound. Cordis keeps plain semver so prereleases
+  // such as 4.2.0-rc.1 still fail ^4.1.0.
   const options = name.startsWith('@deepseek-ai/dsh') ? { includePrerelease: true } : undefined
   if (!item || !satisfies(item.version, range, options)) {
     throw new Error(`Host package/version mismatch: ${name} expected ${range}, found ${item?.version ?? 'missing'}`)

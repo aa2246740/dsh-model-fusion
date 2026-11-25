@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm';
-import type { Role, TaskId } from '../contracts.js';
+import type { PhysicalRoute, Role, TaskId } from '../contracts.js';
 import type { SqliteFusionStore } from '../task/sqlite-store.js';
 import type { SessionBinding } from './bindings.js';
 import type { CacheMode } from './cache-defaults.js';
@@ -29,6 +29,8 @@ type Owner = {
 };
 interface Callbacks {
     owner(agent: Agent): Owner | undefined;
+    /** Effective physical route for resolving virtual `dsh-model-fusion/auto` requests. */
+    route?(owner: Owner): PhysicalRoute;
     /** Effective route and its generation; a frozen profile does not follow model switches. */
     routeKey?(owner: Owner): string;
     allowed(agent: Agent, owner: Owner): boolean;

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { AgentRegistry, type Agent } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-compaction'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SqliteFusionStore } from '../src/task/sqlite-store.js'
 import { observeNativeUsage, type NativeUsageRecord } from '../src/host/native-usage.js'
@@ -16,14 +17,14 @@ function setup() {
   const dispose = observeNativeUsage(ctx, store, () => ({ taskId: TaskId('t'), role: 'worker' }))
   cleanup.push(async () => { dispose(); await ctx.fiber.dispose(); store.close() })
   const stream = (next: () => AsyncIterable<StreamChunk>, signal?: AbortSignal) => ctx.waterfall('llm/stream', {
-    provider: 'fixture', model: 'worker', sessionId: agent.id, purpose: 'compaction', maxTokens: 65536, messages: [], signal,
-  } as GenerateOptions, next)
+    provider: 'fixture', model: 'worker', sessionId: agent.id, purpose: 'compaction' as const, maxTokens: 65536, messages: [], signal,
+  } as unknown as GenerateOptions, next)
   const rows = () => store.listDocumentIds('usage:').map(id => store.readDocument(id)!.value as NativeUsageRecord)
   return { store, stream, rows }
 }
 
 describe('bounded compaction observer lifecycle', () => {
-  it.each(['empty', 'throw', 'break'] as const)('settles %s streams without requiring a finish chunk', async mode => {
+  it.each(['empty', 'throw', 'break'] as const)('settles %s streams without requiring a finish chunk', async (mode: 'empty' | 'throw' | 'break') => {
     const { stream, rows } = setup()
     const consume = async () => { for await (const _ of stream(async function* () {
       if (mode === 'throw') throw new Error('fixture')

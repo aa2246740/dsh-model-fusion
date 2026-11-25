@@ -11,6 +11,7 @@ import { digestOf } from '../digest.js'
 import { FusionCoordinator } from '../host/coordinator.js'
 import { NativeRequestBudget } from '../host/native-budget.js'
 import { nativeRequestAgent } from '../host/native-request.js'
+import { isForwardedFusionRequest, isFusionSelection } from '../host/native-selection.js'
 import { observeNativeUsage } from '../host/native-usage.js'
 import type { NativeUsageRecord } from '../host/native-usage.js'
 import { nativeShellTool } from '../host/shell.js'
@@ -107,7 +108,7 @@ export async function runNativeBenchmark(ctx: Context, options: NativeBenchmarkO
   try {
     parent = (await ctx.agents.create({ sessionId: SessionId(`bench-${options.runId}-${randomUUID()}`),
       meta: { cwd: workspace }, agentOptions: { ...nativeRoute, maxTokens: outputLimits.roles[role].maxTokens } })).agent
-    installModelSelection(parent.ctx, { current: nativeRoute, assembled: undefined })
+    installModelSelection(parent.ctx)
   } catch (error) { store.close(); throw error }
   let taskId = soloTask
   try {
@@ -129,6 +130,7 @@ export async function runNativeBenchmark(ctx: Context, options: NativeBenchmarkO
         : naive?.owns(agent) ? { taskId, role: 'worker' } : undefined)
     }
     stopGuard = ctx.on('llm/stream', async function* (request, next) {
+      if (isForwardedFusionRequest(request)) { yield* next(); return }
       const agent = nativeRequestAgent(ctx, request)
       if (!agent || (coordinator ? !coordinator.owner(agent) : naive ? !naive.owns(agent) : agent !== parent)) {
         throw new Error('Benchmark refuses unowned auxiliary model calls')
@@ -137,7 +139,9 @@ export async function runNativeBenchmark(ctx: Context, options: NativeBenchmarkO
       if (isAgentLoopRequest(request) && request.purpose === undefined) {
         const requestRole = coordinator?.owner(agent)?.role ?? (agent === parent ? role : 'worker')
         const frozen = outputLimits.roles[requestRole]
-        if (request.provider !== frozen.provider || request.model !== frozen.model || request.maxTokens !== frozen.maxTokens) {
+        const owner = coordinator?.owner(agent)
+        const effective = owner && isFusionSelection(request) ? coordinator!.modelControl.route(owner.binding, owner.role) : request
+        if (effective.provider !== frozen.provider || effective.model !== frozen.model || request.maxTokens !== frozen.maxTokens) {
           throw new Error(`Benchmark ${requestRole} request diverged from frozen role output limits`)
         }
       }

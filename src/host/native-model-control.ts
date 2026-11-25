@@ -51,6 +51,20 @@ interface Callbacks {
   stopAuxiliary(binding: SessionBinding): void
 }
 
+const QUOTA_FAILURE_CODES = new Set([
+  'QUOTA',
+  'ACCOUNT_QUOTA',
+  'QUOTA_EXHAUSTED',
+  'INSUFFICIENT_QUOTA',
+  'USAGE_LIMIT_REACHED',
+  'BILLING_HARD_LIMIT_REACHED',
+])
+
+/** True when a provider failure code explicitly indicates exhausted account/API quota. */
+export function isQuotaFailureCode(code: string | undefined): boolean {
+  return code !== undefined && QUOTA_FAILURE_CODES.has(code.toUpperCase())
+}
+
 /** Durable local controls. No provider polling, synthetic user identity, or silent routing fallback. */
 export class NativeModelControl {
   readonly #bindings: BindingRepository
@@ -64,7 +78,7 @@ export class NativeModelControl {
     this.#dispose.push(ctx.on('agent/request-error', async (payload, next) => {
       const owner = callbacks.owner(payload.agent)
       if (owner?.binding.profile.interactionMode !== 'model-like') return next()
-      const quota = ['QUOTA', 'QUOTA_EXHAUSTED', 'INSUFFICIENT_QUOTA', 'USAGE_LIMIT_REACHED'].includes(payload.failure.code)
+      const quota = isQuotaFailureCode(payload.failure.code)
       if (!quota) {
         const action = await next()
         if (!action && !payload.signal.aborted) this.failure(owner.binding, owner.role, payload.failure)

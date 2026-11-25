@@ -37,7 +37,7 @@ describe('public Host development links', () => {
   })
 
   // '4.1.0-rc.1' must NOT satisfy '^4.0.4': prerelease versions need standard semver gating.
-  it.each(['5.0.0', '4.1.0-rc.1'])('rejects incompatible packages before creating a link (%s)', version => {
+  it.each(['5.0.0', '4.1.0-rc.1'])('rejects incompatible packages before creating a link (%s)', (version: string) => {
     const f = fixture(version)
     expect(f.run).toThrow(/Host package\/version mismatch/)
     expect(existsSync(f.link)).toBe(false)

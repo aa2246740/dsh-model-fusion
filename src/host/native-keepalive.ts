@@ -4,7 +4,7 @@ import type {} from '@deepseek-ai/dsh-compaction'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, isAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
-import type { Role, TaskId } from '../contracts.js'
+import type { PhysicalRoute, Role, TaskId } from '../contracts.js'
 import { digestOf } from '../digest.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import type { SessionBinding } from './bindings.js'
@@ -12,6 +12,7 @@ import type { CacheMode } from './cache-defaults.js'
 import { cacheHit } from './cache-policy.js'
 import { NativeAuxiliaryRequests } from './native-auxiliary.js'
 import { nativeRequestAgent } from './native-request.js'
+import { isForwardedFusionRequest, isFusionSelection } from './native-selection.js'
 
 /** R19 recovered schedule. */
 export const KEEPALIVE_INTERVAL_MS = 285_000
@@ -41,6 +42,8 @@ const systemClock: KeepaliveClock = {
 type Owner = { binding: SessionBinding; role: Role }
 interface Callbacks {
   owner(agent: Agent): Owner | undefined
+  /** Effective physical route for resolving virtual `dsh-model-fusion/auto` requests. */
+  route?(owner: Owner): PhysicalRoute
   /** Effective route and its generation; a frozen profile does not follow model switches. */
   routeKey?(owner: Owner): string
   allowed(agent: Agent, owner: Owner): boolean
@@ -96,14 +99,22 @@ export class NativeCacheKeepalive {
     readonly auxiliary: NativeAuxiliaryRequests, readonly callbacks: Callbacks,
     readonly clock: KeepaliveClock = systemClock) {}
 
+  #effectiveRoute(owner: Owner, request: { provider: string; model: string }): { provider: string; model: string } {
+    if (!isFusionSelection(request)) return { provider: request.provider, model: request.model }
+    const route = this.callbacks.route?.(owner) ?? owner.binding.profile[owner.role]
+    return { provider: route.provider, model: route.model }
+  }
+
   #active(row: Series): boolean {
     if (this.#closed || this.#series.get(row.agent.id) !== row || row.controller.signal.aborted
       || this.ctx.agents.get(row.agent.id) !== row.agent) return false
     const current = this.callbacks.owner(row.agent)
-    return Boolean(current?.binding.selected && current.binding.taskId === row.owner.binding.taskId
+    if (!current) return false
+    const route = this.#effectiveRoute(current, row.input)
+    return Boolean(current.binding.selected && current.binding.taskId === row.owner.binding.taskId
       && current.binding.profile.digest === row.owner.binding.profile.digest && current.role === row.owner.role
       && this.callbacks.routeKey?.(current) === row.routeKey
-      && this.#policy(current, row.input.provider, row.input.model).mode !== 'off' && this.callbacks.allowed(row.agent, current))
+      && this.#policy(current, route.provider, route.model).mode !== 'off' && this.callbacks.allowed(row.agent, current))
   }
 
   #policy(owner: Owner, provider: string, model: string): { mode: CacheMode; intervalMs: number } {
@@ -205,11 +216,13 @@ export class NativeCacheKeepalive {
     // Evidence for the settings page and the interval rule: how long each agent waited and whether its
     // prefix was still cached. Pings count too (they refresh the cache the next request relies on).
     this.#dispose.push(this.ctx.on('llm/stream', async function* (request, next): AsyncIterable<StreamChunk> {
+      if (isForwardedFusionRequest(request)) { yield* next(); return }
       const agent = nativeRequestAgent(manager.ctx, request), owner = agent && manager.callbacks.owner(agent)
       const extra = manager.auxiliary.get(request), ping = extra?.purpose === 'cache-keepalive'
       if (!agent || !owner || !manager.callbacks.observe || (extra && !ping) || (!ping && (!isAgentLoopRequest(request) || request.purpose !== undefined))) {
         yield* next(); return
       }
+      const route = manager.#effectiveRoute(owner, request)
       const started = manager.clock.now(), previous = manager.#lastStart.get(agent.id)
       manager.#lastStart.set(agent.id, started)
       let usage: { inputTokens?: number; cacheReadTokens?: number; outputTokens?: number } | undefined
@@ -220,13 +233,14 @@ export class NativeCacheKeepalive {
       if (!usage || previous === undefined) return
       const cacheRead = usage.cacheReadTokens ?? 0, input = usage.inputTokens ?? 0
       try {
-        manager.callbacks.observe(owner, request.provider, request.model,
+        manager.callbacks.observe(owner, route.provider, route.model,
           { gapSeconds: (started - previous) / 1000, ping, hit: cacheHit(cacheRead, input), cacheRead, input, output: usage.outputTokens ?? 0 })
       } catch { /* evidence is advisory; never fail a model request over it */ }
     }))
     // Replacement invalidates the previous loop even if the next input is
     // rejected locally. An in-flight ping drains before a new request enters.
     this.#dispose.push(this.ctx.on('llm/stream', async function* (request, next) {
+      if (isForwardedFusionRequest(request)) { yield* next(); return }
       if (!manager.auxiliary.get(request) && (isAgentLoopRequest(request) || request.purpose === 'compaction')) {
         const agent = nativeRequestAgent(manager.ctx, request)
         if (agent) await manager.stopSession(agent.id, request.purpose === 'compaction' ? 'compaction' : 'new-generation')
@@ -236,12 +250,14 @@ export class NativeCacheKeepalive {
     // This observer is inside admission. Only actual admitted AgentLoop input
     // can establish a new prefix; unrelated one-shot calls cannot start timers.
     this.#dispose.push(this.ctx.on('llm/stream', async function* (request, next): AsyncIterable<StreamChunk> {
+      if (isForwardedFusionRequest(request)) { yield* next(); return }
       const agent = nativeRequestAgent(manager.ctx, request), owner = agent && manager.callbacks.owner(agent)
       // Explicit per-role choice wins. Unset means automatic for the Lead: it waits minutes for the Sidekick,
       // and an expired prefix is resent uncached at the frontier price (round 4: 69% cache hits against 94%
       // alone). Automatic arming requires this route to have reported cache reads, so a route without prompt
       // caching never pays for pings.
-      const policy = owner ? manager.#policy(owner, request.provider, request.model) : undefined
+      const route = owner ? manager.#effectiveRoute(owner, request) : undefined
+      const policy = owner && route ? manager.#policy(owner, route.provider, route.model) : undefined
       if (!agent || !owner || !policy || policy.mode === 'off' || manager.auxiliary.get(request)
         || !isAgentLoopRequest(request) || request.purpose !== undefined || manager.#closed) { yield* next(); return }
       // Copy only public fields: no AgentLoop brand, source signal or mutable

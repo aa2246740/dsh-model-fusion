@@ -5,6 +5,7 @@ import { createUserMessage, isAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { ArtifactRef, Role, TaskId } from '../contracts.js'
 import { digestOf } from '../digest.js'
+import { isInstructionSource } from '../message-source.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import type { SessionBinding } from './bindings.js'
 import { compactHandoffs, workerHandoffProjection } from './native-worker-brief.js'
@@ -83,7 +84,7 @@ export class NativeTaskContext {
     const firstSeq = rawOrigin?.firstSeq ?? 0
     const instructions = parent.session.snapshotEvents().flatMap(event => {
       if (event.seq < firstSeq || event.type !== 'user/message'
-        || event.data.source !== undefined && event.data.source.kind !== 'user') return []
+        || !isInstructionSource(event.data.source)) return []
       return [{ source: { sessionId: parent.id, eventSeq: event.seq, messageId: event.data.id,
         kind: event.data.source?.kind ?? 'unspecified-native-user-role' },
         text: event.data.content.filter(block => block.type === 'text').map(block => block.text),

@@ -14,7 +14,7 @@ function agent(): Agent {
     id: 'lead-1',
     status: 'idle',
     ctx: {
-      tools: { guard: () => dispose, restrict: () => dispose, presentAs: () => dispose },
+      tools: { guard: () => dispose, restrict: () => dispose },
       on: () => dispose,
       systemPrompt: { section: () => dispose },
     },

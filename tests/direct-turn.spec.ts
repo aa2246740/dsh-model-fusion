@@ -3,12 +3,12 @@ import { directTurnLeavesWorkOpen, isBareContinuation } from '../src/host/coordi
 
 describe('enforced-v3 direct turns and bare continuations', () => {
   it.each(['Continue', 'Continue.', 'continue!', 'go on', 'keep going', '继续', '继续。', '请继续', '接着做'])(
-    'treats %j as a bare continuation', text => {
+    'treats %j as a bare continuation', (text: string) => {
       expect(isBareContinuation(text)).toBe(true)
     })
 
   it.each(['Continue the existing task.', 'Correct addition in calc.py.', 'Hello.', 'Continue. Also change the name.'])(
-    'does not treat %j as a bare continuation', text => {
+    'does not treat %j as a bare continuation', (text: string) => {
       expect(isBareContinuation(text)).toBe(false)
     })
 
@@ -127,13 +127,13 @@ const blockedCases = [
 ] as const
 
 describe('validator direct conversation matrix', () => {
-  it.each(directCases)('completes answered explanation $id', ({ prompt, reply }) => {
+  it.each(directCases)('completes answered explanation $id', ({ prompt, reply }: { prompt: string; reply: string }) => {
     expect(directTurnLeavesWorkOpen([prompt], reply)).toBe(false)
   })
 })
 
 describe('validator premature completion matrix', () => {
-  it.each(blockedCases)('keeps unexecuted or planning request open $id', ({ prompt, reply }) => {
+  it.each(blockedCases)('keeps unexecuted or planning request open $id', ({ prompt, reply }: { prompt: string; reply: string }) => {
     expect(directTurnLeavesWorkOpen([prompt], reply)).toBe(true)
   })
 })

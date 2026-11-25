@@ -3,12 +3,13 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
-import type { Role, TaskId } from '../contracts.js'
+import type { PhysicalRoute, Role, TaskId } from '../contracts.js'
 import { digestOf } from '../digest.js'
 import { ingestDurable, known, newLedger, unknown } from '../usage/ledger.js'
 import type { CanonicalBill, UsageLedgerV2 } from '../usage/ledger.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import { nativeRequestAgent } from './native-request.js'
+import { isForwardedFusionRequest, isFusionSelection } from './native-selection.js'
 import type { NativeAuxiliaryRequests } from './native-auxiliary.js'
 
 export interface UsageOwner { readonly taskId: TaskId; readonly role: Role }
@@ -59,14 +60,20 @@ export interface NativeUsageRecord {
 export function observeNativeUsage(
   ctx: Context, store: SqliteFusionStore, ownerOf: (agent: Agent) => UsageOwner | undefined,
   auxiliary?: NativeAuxiliaryRequests,
+  routeOf?: (agent: Agent, owner: UsageOwner) => PhysicalRoute | undefined,
 ): () => void {
   return ctx.on('llm/stream', async function* (options, next): AsyncIterable<StreamChunk> {
+    if (isForwardedFusionRequest(options)) { yield* next(); return }
     const agent = nativeRequestAgent(ctx, options)
     const owner = agent && ownerOf(agent)
     if (!owner || !agent) { yield* next(); return }
     const extra = auxiliary?.get(options)
+    const physical = isFusionSelection(options) ? routeOf?.(agent, owner) : undefined
+    const provider = physical?.provider ?? options.provider
+    const model = physical?.model ?? options.model
+    const reasoningEffort = physical ? physical.reasoningEffort : options.reasoningEffort
     const id = `native:${randomUUID()}`
-    const key = { provider: options.provider, model: options.model, requestId: id, attemptId: id,
+    const key = { provider, model, requestId: id, attemptId: id,
       contractDigest: digestOf({ host: '0.1.5-rc.2', input: 'disjoint', reasoning: 'unknown', missing: 'unknown' }) }
     let ledger = newLedger(key)
     let revision = 0, summaryRevision = 0
@@ -75,7 +82,7 @@ export function observeNativeUsage(
     const record: NativeUsageRecord = {
       schemaVersion: 1, taskId: owner.taskId, sessionId: agent.id, role: owner.role, purpose: extra?.purpose ?? options.purpose ?? 'conversation', nativeInvocationId: id,
       maxOutputTokens: options.maxTokens ?? null,
-      ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }),
+      ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
       ...(extra ? { auxiliary: { seriesId: extra.seriesId, iteration: extra.iteration } } : {}),
       startedAt: new Date().toISOString(), endedAt: null, nativeStreamInvocations: 1, upstreamHttpCalls: null,
       outcome: 'entered', ledger, actualSubscriptionChargeUsd: null, apiEquivalentCostUsd: null,

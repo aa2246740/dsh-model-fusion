@@ -96,6 +96,8 @@ async function setup(script: Script, workerScript?: Script, options: {
   /** Register a sandbox-policy service that folds `sandbox/mode` events like the Host's. */
   sandbox?: boolean
   noCwd?: boolean
+  selectOnSetup?: boolean
+  registerAdapter?: boolean
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'fusion-coordinator-'))
   const workspace = join(root, 'project')
@@ -104,15 +106,8 @@ async function setup(script: Script, workerScript?: Script, options: {
   writeFileSync(join(workspace, 'test_calc.py'), 'import unittest\nfrom calc import add\nclass TestAdd(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(add(2, 3), 5)\n')
   const ctx = new Context()
   const store = new SqliteFusionStore(join(root, 'fusion.sqlite'))
-  // 0.2.1 dropped tools.mode "both". Keep native presentation and still mount the code runtime below.
-  const requestedMode = options.toolMode ?? 'native'
-  let mode: 'native' | 'ptc' | 'both' = requestedMode
-  if (requestedMode === 'both') {
-    try { ToolRuntime.Config({ mode: 'both' }) }
-    catch { mode = 'native' }
-  }
-  hostPublishesRunCode = mode === 'both'
-  await mountAgentLoopTestDependencies(ctx, { tools: { mode } })
+  hostPublishesRunCode = false
+  await mountAgentLoopTestDependencies(ctx)
   if (options.toolMode === 'both') {
     await ctx.plugin(LocalFileSystem, { cwd: workspace })
     await ctx.plugin(LocalSandbox)
@@ -179,7 +174,7 @@ async function setup(script: Script, workerScript?: Script, options: {
     ...(options.presetTools ? { setup: async (scope: Context) => { await ctx.agentPresets.mount(scope, 'scoped-files') } } : {}),
     agentOptions: { provider: 'test-native', model: 'ordinary', maxTokens: options.parentMaxTokens } })).agent
   const selectionRef = { current: { provider: 'test-native', model: 'ordinary' }, assembled: undefined }
-  installModelSelection(parent.ctx, selectionRef)
+  installModelSelection(parent.ctx)
   const prompts = loadPromptBundle()
   const profile = completeProfile({ id: 'fusion-auto', version: 'faithful-v1', enabled: true,
     ...(options.keepalive ? { cacheKeepalive: options.keepalive } : {}),
@@ -199,11 +194,12 @@ async function setup(script: Script, workerScript?: Script, options: {
     workerTools: [...(options.jobs ? [shellTool, 'job_output', 'job_kill'] : [shellTool]), ...(options.files ? ['read', 'write', 'edit'] : [])], keepaliveClock: options.clock,
     commandMaxSeconds: options.commandMaxSeconds,
     maxWorkerSteps: options.maxWorkerSteps, maxReworkRounds: options.maxReworkRounds,
+    registerAdapter: options.registerAdapter,
     authorizeRequest: () => { /* scripted in-process adapter: no upstream or bill */ },
     reserveRequest: request => { budget && budget.reserve(request, request.maxTokens!) } })
   cleanups.push(async () => { await coordinator.close(); await ctx.fiber.dispose(); store.close(); rmSync(root, { recursive: true, force: true }) })
-  await coordinator.select(parent)
-  const taskId = coordinator.bindings.read(parent.id)!.binding.taskId
+  if (options.selectOnSetup !== false) await coordinator.select(parent)
+  const taskId = coordinator.bindings.read(parent.id)?.binding.taskId!
   return { ctx, parent, coordinator, store, adapter, taskId, workspace, selectionRef, authorization, modelContext }
 }
 
@@ -678,7 +674,7 @@ describe('read-only exploration before a Lead plan', () => {
     expect(store.listDocumentIds('child:')).toHaveLength(1)
   })
 
-  it('retains preset-owned reads and hides unrelated agent-local tools in actual Worker requests', async () => {
+  it('retains preset-owned reads and guards unrelated agent-local tools in actual Worker requests', async () => {
     const { ctx, parent, coordinator, adapter, taskId, workspace } = await setup(
       [explore(), delegate(), review('accept'), textResponse('Verified.')],
       [toolCallResponse('forbidden-local', 'child_local_probe', {}), readCalc(), findings(), edit(), report()],
@@ -690,8 +686,11 @@ describe('read-only exploration before a Lead plan', () => {
     const exploration = requests.filter(request => taskSnapshot(request).workOrder.mode === 'explore')
     expect(exploration).toHaveLength(3)
     for (const request of exploration) {
-      expect(request.tools?.map(tool => tool.name).sort()).toEqual(['fusion_read_evidence', 'fusion_submit_result', 'read'])
+      // DSH 0.2.2 scope.tools.restrict() masks global and preset tools (hiding write/edit/shell
+      // while retaining preset-owned read); third-party agent-local tools are blocked by the guard.
+      expect(request.tools?.map(tool => tool.name).filter(name => name !== 'child_local_probe').sort()).toEqual(['fusion_read_evidence', 'fusion_submit_result', 'read'])
     }
+    expect(JSON.stringify(exploration.at(-1)!.messages)).toContain('Exploration is read-only')
     expect(JSON.stringify(exploration.at(-1)!.messages)).toContain('return a - b')
     expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
     expect(() => readFileSync(join(workspace, 'must-not-exist'))).toThrow()
@@ -2198,16 +2197,15 @@ describe('complete native Fusion workflow', () => {
   it('uses an unmodified native model selection and never dispatches a virtual upstream request', async () => {
     const { ctx, parent, coordinator, adapter, selectionRef } = await setup([
       delegate(), edit(), report(), review('accept'), textResponse('Verified'), textResponse('Ordinary answer'),
-    ])
-    await coordinator.clear(parent)
-    const catalog = new FusionCatalogAdapter()
+    ], undefined, { selectOnSetup: false, registerAdapter: false })
+    const catalog = new FusionCatalogAdapter({ ctx, coordinator: () => coordinator })
     ctx.llm.registerAdapter([FUSION_PROVIDER], catalog)
     expect(await catalog.resolveModel(FUSION_PROVIDER, FUSION_MODEL)).not.toHaveProperty('reasoning')
     const remove = installNativeFusionSelection(ctx, { coordinator: () => coordinator,
       profile: () => coordinator.options.profile, selection: () => selectionRef.current })
     cleanups.push(async () => remove())
     const fusion = { provider: FUSION_PROVIDER, model: FUSION_MODEL }
-    parent.session.append('model/selection', fusion)
+    parent.model.select(fusion)
     selectionRef.current = fusion
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Fix addition and verify.' }] }))
     await parent.whenIdle()
@@ -2217,7 +2215,7 @@ describe('complete native Fusion workflow', () => {
     expect(parent.session.snapshotEvents().filter(event => event.type === 'user/message'
       && event.data.source?.kind === 'model-selection')).toHaveLength(0)
     const ordinary = { provider: 'test-native', model: 'ordinary' }
-    parent.session.append('model/selection', ordinary)
+    parent.model.select(ordinary)
     selectionRef.current = ordinary
     await waitForNative(() => expect(coordinator.bindings.read(parent.id)?.binding.selected).toBe(false))
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Hello' }] }))
@@ -2229,8 +2227,7 @@ describe('complete native Fusion workflow', () => {
   it('installs a saved default Fusion selection before the first prompt and tool assembly', async () => {
     const { ctx, parent, coordinator, selectionRef, adapter } = await setup([
       delegate(), edit(), report(), review('accept'), textResponse('Verified'),
-    ])
-    await coordinator.clear(parent)
+    ], undefined, { selectOnSetup: false })
     const remove = installNativeFusionSelection(ctx, { coordinator: () => coordinator,
       profile: () => coordinator.options.profile, selection: () => selectionRef.current })
     cleanups.push(async () => remove())
@@ -2245,20 +2242,22 @@ describe('complete native Fusion workflow', () => {
     expect(intent).toHaveLength(1)
     expect(intent[0]).toMatchObject({ data: { provider: FUSION_PROVIDER, model: FUSION_MODEL } })
     expect(events.indexOf(intent[0]!)).toBeLessThan(events.findIndex(event => event.type === 'request/header'))
-    // Physical request accounting stays truthful; the native menu retains the
-    // separately committed virtual selection even when it was a saved default.
+    // DSH 0.2.2 locks the logged request header to the outer virtual selection;
+    // the physical Lead adapter still serves every Lead call.
     expect(events.findLast(event => event.type === 'request/header')).toMatchObject({
-      data: { header: { config: { provider: 'test-native', model: 'lead' } } },
+      data: { header: { config: { provider: FUSION_PROVIDER, model: FUSION_MODEL } } },
     })
+    expect(adapter.requests.map(request => request.model)).toEqual(['lead', 'worker', 'worker', 'lead', 'lead'])
   })
 
   it('shows a settings instruction without invoking a model when Fusion has no configured pair', async () => {
-    const { ctx, parent, coordinator, selectionRef, adapter } = await setup([textResponse('Must not run')])
+    const { ctx, parent, coordinator, selectionRef, adapter } = await setup([textResponse('Must not run')], undefined, { registerAdapter: false })
     await coordinator.clear(parent)
     ctx.llm.registerAdapter([FUSION_PROVIDER], new FusionCatalogAdapter())
     const remove = installNativeFusionSelection(ctx, { coordinator: () => undefined,
       profile: () => undefined, selection: () => selectionRef.current })
     cleanups.push(async () => remove())
+    parent.model.select({ provider: FUSION_PROVIDER, model: FUSION_MODEL })
     selectionRef.current = { provider: FUSION_PROVIDER, model: FUSION_MODEL }
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Hello' }] }))
     await parent.whenIdle()
@@ -3407,11 +3406,13 @@ describe('adaptive model workflow', () => {
     expect(() => readFileSync(join(workspace, 'ptc-bypass'))).toThrow()
     const lead = adapter.requests.filter(request => request.model === 'lead')
     if (hostPublishesRunCode) expect(lead[0]!.tools!.map(tool => tool.name)).toContain('run_code')
-    for (const request of lead.slice(2)) for (const name of [shellTool, 'write', 'run_code', 'local_effect',
+    for (const request of lead.slice(2)) for (const name of [shellTool, 'write', 'run_code',
       'fusion_delegate', 'fusion_delegate_text', 'fusion_explore', 'fusion_finish_direct', 'fusion_wait']) {
       expect((request.tools ?? []).map(tool => tool.name)).not.toContain(name)
     }
-    expect(lead.at(-1)!.tools ?? []).toEqual([])
+    // Third-party agent-local tools (local_effect) remain governed by the deny-only guard;
+    // every inherited global and Fusion tool is absent once the task completes.
+    expect((lead.at(-1)!.tools ?? []).map(tool => tool.name).filter(name => name !== 'local_effect')).toEqual([])
   })
 
   it('automatically repairs definite check failures on the same Worker without a Lead relay call', async () => {
@@ -3613,7 +3614,8 @@ describe('enforced model workflow', () => {
     await parent.whenIdle()
     expect(effects).toBe(0)
     expect(() => readFileSync(join(workspace, 'ptc-bypass'))).toThrow()
-    expect(adapter.requests[0]!.tools!.map(tool => tool.name)).not.toContain('local_effect')
+    expect(adapter.requests[0]!.tools!.map(tool => tool.name)).not.toContain(shellTool)
+    expect(adapter.requests[0]!.tools!.map(tool => tool.name)).not.toContain('run_code')
     const ordinary = (await ctx.agents.create({ sessionId: SessionId('ordinary-enforcement'), meta: { cwd: workspace },
       agentOptions: { provider: 'test-native', model: 'ordinary' } })).agent
     expect((await ordinary.ctx.systemPrompt.assemble()).tools.map(tool => tool.name)).toContain(shellTool)
@@ -4007,12 +4009,11 @@ describe('enforced-v3 daily-driver safeguards (study 2026-09-26)', () => {
   })
 })
 
-/** dsh-tool-search replaces assembled.tools inside system-prompt/assemble. Fusion's prepend hook calls next() first, so this listener runs underneath it. */
-function replaceAssembledTools(scope: Context): void {
-  const eager = new Set(['read', 'glob', 'grep', 'bash', 'pwsh', 'write', 'edit'])
+/** DSH 0.2.2 system-prompt/assemble owns prompt presentation only; downstream presentation hooks cannot remove provider-owned tool declarations. */
+function observePromptPresentation(scope: Context): void {
   scope.on('system-prompt/assemble', async (_assembly, _context, next) => {
     const assembled = await next()
-    return { ...assembled, tools: assembled.tools.filter(tool => eager.has(tool.name)) }
+    return { ...assembled, variables: { ...assembled.variables, fusion_probe: 'present' } }
   })
 }
 
@@ -4021,7 +4022,7 @@ const requestToolNames = (request: { tools?: { name: string }[] | undefined }) =
 describe('profile registrations against the real role allowlist', () => {
   it('serves a legacy Lead request without requiring tools that profile never registered', async () => {
     const { parent, adapter } = await setup([textResponse('Hello.')])
-    replaceAssembledTools(parent.ctx)
+    observePromptPresentation(parent.ctx)
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Hello.' }] }))
     await parent.whenIdle()
     expect(adapter.requests).toHaveLength(1)
@@ -4039,7 +4040,7 @@ describe('profile registrations against the real role allowlist', () => {
     )
     ctx.on('agent/created', ({ agent }) => {
       if (!agent.session.header.parentSession) return
-      replaceAssembledTools(agent.ctx)
+      observePromptPresentation(agent.ctx)
     })
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Explain the addition code.' }] }))
     await parent.whenIdle()
@@ -4074,7 +4075,7 @@ describe('profile registrations against the real role allowlist', () => {
 
   it('restores a read-only enforced Lead catalog and still withholds write tools', async () => {
     const { parent, adapter } = await setup([textResponse('Hello.')], undefined, { modelLike: true, enforcedWorkflow: 'enforced-v3' as const, files: true, sandbox: true })
-    replaceAssembledTools(parent.ctx)
+    observePromptPresentation(parent.ctx)
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Hello.' }] }))
     await parent.whenIdle()
     expect(adapter.requests).toHaveLength(1)

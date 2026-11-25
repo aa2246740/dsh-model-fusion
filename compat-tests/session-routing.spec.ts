@@ -13,9 +13,9 @@ import Basic from '@deepseek-ai/dsh-compaction-basic'
 import { LlmAdapter, createUserMessage, ReasoningEffortId, errorChain } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import { Controller } from '@fusion-compat/controller'
 import { CompactionRouteRegistry } from '@fusion-compat/routes'
-import { installModelSelectionProjection } from '@fusion-compat/model-selection'
 import { installCompactionRouting } from '../src/host/compaction-routing.js'
 import { NativeContextGuard } from '../src/host/native-context.js'
 import { SqliteFusionStore } from '../src/task/sqlite-store.js'
@@ -52,7 +52,6 @@ async function fixture(options: { distinctCompactors?: boolean; workerOwner?: bo
   cleanups.push(async () => { for (const h of held.values()) h.release(); await ctx.fiber.dispose(); store.close(); rmSync(root, { recursive: true, force: true }) })
   await mountAgentLoopTestDependencies(ctx)
   await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(TokenMeter); await ctx.plugin(Loader)
-  installModelSelectionProjection(ctx)
   ctx.loader.internal = { version: 'v2', async import(name: string) {
     if (name === '@deepseek-ai/dsh-compaction-basic') return Basic
     throw new Error(name)
@@ -114,6 +113,7 @@ async function fixture(options: { distinctCompactors?: boolean; workerOwner?: bo
   const prompts = { lead: 'Lead fixture', worker: 'Worker fixture', compact: 'Summary fixture' }
   for (const [id, model] of [['compat-a', 'lead'], ['compat-b', 'lead-small']]) {
     const agent = (await ctx.agents.create({ sessionId: SessionId(id!), agentOptions: { provider: 'physical', model: model!, maxTokens: 1024 } })).agent
+    installModelSelection(agent.ctx)
     const profile = completeProfile({ id, version: '1', enabled: true, interactionMode: 'model-like',
       lead: { provider: 'physical', model }, worker: { provider: 'physical', model: 'worker' },
       compactor: { route: { provider: 'physical', model: options.distinctCompactors && id === 'compat-b' ? 'summary-b' : 'summary', reasoningEffort: 'max' }, maxOutputTokens: options.distinctCompactors && id === 'compat-b' ? 1024 : 2048 } }, prompts)
@@ -125,7 +125,7 @@ async function fixture(options: { distinctCompactors?: boolean; workerOwner?: bo
     for (const text of ['Synthetic requirement and frozen test. '.repeat(700), 'Recent constraint remains authoritative. '.repeat(400)]) {
       agent.followup(createUserMessage({ content: [{ type: 'text', text }] })); await agent.whenIdle()
     }
-    agent.session.append('model/selection', { provider: 'dsh-model-fusion', model: 'auto' })
+    agent.model.select({ provider: 'dsh-model-fusion', model: 'auto' })
     agents.push(agent)
   }
   cleanups.push(async () => { stopRouting(); stopGuard() })

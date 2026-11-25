@@ -31,7 +31,7 @@ describe('source-backed exploration evidence', () => {
     { path: 'a.ts', startLine: 0, endLine: 2 },
     { path: 'a.ts', startLine: 1, endLine: 99 },
     { path: 'missing.ts', startLine: 1, endLine: 2 },
-  ])('rejects an unbacked or invalid range: %j', source => {
+  ])('rejects an unbacked or invalid range: %j', (source: { path: string; startLine: number; endLine: number }) => {
     const { store, snapshot, work, submitted } = fixture()
     expect(() => captureExploration(store, work, snapshot, snapshot, submitted, [source])).toThrow()
     expect(store.artifacts(TASK)).toEqual([])
@@ -220,7 +220,7 @@ describe('source-backed exploration evidence', () => {
     expect(() => reduceAll([...events.slice(0, 4), envelope('exploration/recorded', 5, { report: { ...report, revision: 2 } })])).toThrow()
   })
 
-  it.each(['blocked', 'needs-decision'] as const)('records a %s report when the whole-tree snapshot failed', status => {
+  it.each(['blocked', 'needs-decision'] as const)('records a %s report when the whole-tree snapshot failed', (status: 'blocked' | 'needs-decision') => {
     const { store, snapshot, work } = fixture()
     const report = captureExploration(store, work, snapshot, undefined, { status, summary: 'The tree could not be listed.', unresolved: ['Need a decision'] }, [], 'Unsupported source file type: unrelated.pipe')
     expect(report.status).toBe(status)
@@ -243,7 +243,7 @@ describe('source-backed exploration evidence', () => {
     { label: 'changed', apply: (root: string) => writeFileSync(join(root, 'a.ts'), 'changed\n'), message: 'changed during capture' },
     { label: 'deleted', apply: (root: string) => rmSync(join(root, 'a.ts')), message: 'Exploration source is missing' },
     { label: 'replaced with a symlink', apply: (root: string) => { rmSync(join(root, 'a.ts')); writeFileSync(join(root, 'copy.ts'), 'export function add(a, b) {\n  return a - b\n}\n'); symlinkSync('copy.ts', join(root, 'a.ts')) }, message: 'symlink' },
-  ])('rejects a completed report whose cited file was $label even if the tree snapshot already failed', ({ apply, message }) => {
+  ])('rejects a completed report whose cited file was $label even if the tree snapshot already failed', ({ apply, message }: { apply: (root: string) => void; message: string }) => {
     const { root, store, snapshot, work, submitted } = fixture()
     apply(root)
     expect(() => captureExploration(store, work, snapshot, undefined, submitted, [{ path: 'a.ts', startLine: 1, endLine: 2 }], 'Unsupported source file type: unrelated.pipe')).toThrow(message)

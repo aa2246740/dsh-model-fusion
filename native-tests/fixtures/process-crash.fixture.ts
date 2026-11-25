@@ -118,7 +118,7 @@ it('runs only inside its owned crash harness', async () => {
   const parent = (phase === 'crash'
     ? await ctx.agents.create({ sessionId: SessionId('lead'), meta: { cwd: workspace }, agentOptions: { provider: 'test-crash', model: 'lead' } })
     : await ctx.agents.resume({ resumeSessionId: SessionId('lead'), agentOptions: { provider: 'test-crash', model: 'lead' } })).agent
-  installModelSelection(parent.ctx, { current: { provider: 'test-crash', model: 'lead' }, assembled: undefined })
+  installModelSelection(parent.ctx)
   const prompts = loadPromptBundle()
   const profile = completeProfile({ id: 'fusion-auto', version: 'faithful-v1', enabled: true,
     lead: { provider: 'test-crash', model: 'lead' }, worker: { provider: 'test-crash', model: 'worker' }, dataPolicyId: 'fixture-only',

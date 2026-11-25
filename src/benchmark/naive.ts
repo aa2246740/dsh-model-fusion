@@ -3,7 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { hasStartActivation, requireSubagentMethod } from '../host/subagent-seam.js'
+import { requireSubagentMethod } from '../host/subagent-seam.js'
 import type { PairProfile } from '../contracts.js'
 import { digestOf } from '../digest.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
@@ -29,40 +29,6 @@ export interface NaiveDelegation {
   failure: string | null
 }
 
-interface NaiveResult { readonly stopReason: string; readonly output: readonly { readonly type: string; readonly text?: string }[] }
-interface NaiveChild {
-  readonly childId: SessionId
-  readonly result: Promise<NaiveResult>
-  dispose(): Promise<void>
-  /** Set only for the 0.2.0 `SubagentRun`. Absent means read the child from `ctx.agents`. */
-  readonly localAgent?: Agent
-  readonly readChild: 'localAgent' | 'registry'
-}
-interface NaiveSubagents {
-  startActivation?(spec: {
-    readonly provider: string
-    readonly label: string
-    readonly delivery: 'caller'
-    readonly request: {
-      readonly parent: Agent
-      readonly prompt: readonly { readonly type: 'text'; readonly text: string }[]
-      readonly agentOptions: object
-      readonly maxDepth: number
-    }
-    readonly signal: AbortSignal
-  }): Promise<{ readonly childId: SessionId; readonly result: Promise<NaiveResult>; dispose(): Promise<void> }>
-  start?(provider: string, request: {
-    readonly parent: Agent
-    readonly label: string
-    readonly prompt: readonly { readonly type: 'text'; readonly text: string }[]
-    readonly persona: string
-    readonly signal: AbortSignal
-    readonly agentOptions: object
-    readonly toolFilter: { readonly allow: readonly string[] }
-    readonly maxDepth: number
-  }): Promise<{ readonly id: SessionId; readonly localAgent: Agent | undefined; readonly result: Promise<NaiveResult>; dispose(): Promise<void> }>
-}
-
 /** Simple sequential coordinator using the native single-activation child lifecycle. */
 export class NaiveCoordinator {
   readonly delegations: NaiveDelegation[] = []
@@ -78,19 +44,13 @@ export class NaiveCoordinator {
     readonly profile: PairProfile, readonly workerMaxTokens: number, readonly tools: readonly string[] = [nativeShellTool]) {
     const provider = ctx.subagents.getProvider('spawn')
     if (!provider || provider.inheritsParentContext !== false) throw new Error('Naive requires a fresh-context native spawn provider')
-    // 0.2.1 removed `persona` and `toolFilter` and rejects them. A benchmark
-    // baseline must not depend on a user-configured Agent Preset, so on that
-    // seam the Worker prompt and the declared tool set are applied at
-    // `agent/created`, before the child's first request. 0.2.0 still receives
-    // both on `start`, and this hook stays off so that path is unchanged.
-    if (hasStartActivation(ctx.subagents)) {
-      this.#dispose.push(ctx.on('agent/created', ({ agent }) => {
-        if (agent.session.header.parentSession !== parent.id) return undefined
-        agent.ctx.tools.restrict({ allow: [...this.tools] })
-        agent.ctx.systemPrompt.section({ name: 'naive-benchmark-worker', order: 90, text: naivePrompts.worker })
-        return undefined
-      }))
-    }
+    this.#dispose.push(ctx.on('agent/created', ({ agent }) => {
+      if (agent.session.header.parentSession !== parent.id) return undefined
+      const allow = this.tools.filter(name => agent.ctx.tools.get(name, agent) !== undefined)
+      agent.ctx.tools.restrict({ allow })
+      agent.ctx.systemPrompt.section({ name: 'naive-benchmark-worker', order: 90, text: naivePrompts.worker })
+      return undefined
+    }))
     this.#dispose.push(parent.ctx.systemPrompt.section({ name: 'naive-benchmark', order: 90, text: naivePrompts.lead }))
     // Deny overlap even if an external caller bypasses the native sibling
     // scheduler. The declared tool remains exclusive under that scheduler.
@@ -138,7 +98,8 @@ export class NaiveCoordinator {
       state: 'starting', stopReason: null, disposed: false, failure: null }
     this.delegations.push(row)
     const key = `naive-delegation:${this.parent.id}:${row.ordinal}`
-    let revision = 0, started: NaiveChild | undefined
+    let revision = 0
+    let activation: { readonly childId: SessionId; readonly result: Promise<{ readonly stopReason: string; readonly output: readonly { readonly type: string; readonly text?: string }[] }>; dispose(): Promise<void> } | undefined
     const persist = () => { revision = this.store.writeDocument(key, revision, { ...row }) }
     try {
       persist()
@@ -149,51 +110,33 @@ export class NaiveCoordinator {
         maxTokens: this.workerMaxTokens }
       const maxDepth = (this.parent.session.header.delegationDepth ?? 0) + 1
       const runSignal = AbortSignal.any([signal, controller.signal])
-      const subagents = this.ctx.subagents as NaiveSubagents
-      // 0.2.1: `startActivation` with `delivery: 'caller'` returns the result to
-      // the calling tool and does not push it into the Lead inbox. 0.2.0: the
-      // one-shot `start`, with persona and toolFilter still on the request.
-      const start = requireSubagentMethod(subagents, 'startActivation', 'start')
-      if (start === 'startActivation') {
-        const activation = await subagents.startActivation!({
-          provider: 'spawn', label: `Naive Worker ${row.ordinal}`, delivery: 'caller',
-          request: { parent: this.parent, prompt, agentOptions, maxDepth }, signal: runSignal,
-        })
-        started = { childId: activation.childId, result: activation.result, dispose: () => activation.dispose(), readChild: 'registry' }
-      } else {
-        const run = await subagents.start!('spawn', {
-          parent: this.parent, label: `Naive Worker ${row.ordinal}`, prompt, persona: naivePrompts.worker,
-          signal: runSignal, agentOptions, toolFilter: { allow: [...this.tools] }, maxDepth,
-        })
-        started = { childId: run.id, result: run.result, dispose: () => run.dispose(), localAgent: run.localAgent, readChild: 'localAgent' }
-      }
-      // A later validation/journal failure still owns disposal. Observe an
-      // infrastructure rejection immediately, before those checks can throw;
-      // the normal await below retains the actual rejection as the outcome.
-      void started.result.catch(() => undefined)
-      // 0.2.0 published the child on `SubagentRun.localAgent`. 0.2.1 removed
-      // that field; the same Agent is `ctx.agents.get(childId)`.
-      const child = started.readChild === 'localAgent' ? started.localAgent : this.ctx.agents.get(started.childId)
+      requireSubagentMethod(this.ctx.subagents, 'startActivation')
+      activation = await this.ctx.subagents.startActivation({
+        provider: 'spawn', label: `Naive Worker ${row.ordinal}`, delivery: 'caller',
+        parent: this.parent, prompt, agentOptions, maxDepth, signal: runSignal,
+      })
+      void activation.result.catch(() => undefined)
+      const child = this.ctx.agents.get(activation.childId)
       if (!child || child.session.header.parentSession !== this.parent.id) throw new Error('Naive requires an owned native child')
-      if (this.delegations.some(other => other !== row && other.childSessionId === started!.childId)) throw new Error('Naive child identity was reused')
-      row.childSessionId = started.childId
+      if (this.delegations.some(other => other !== row && other.childSessionId === activation!.childId)) throw new Error('Naive child identity was reused')
+      row.childSessionId = activation.childId
       row.state = 'running'
       persist()
-      const result = await started.result
+      const result = await activation.result
       row.stopReason = result.stopReason
       row.state = 'settled'
       persist()
       if (result.stopReason !== 'completed') throw new Error(`Naive Worker ended ${result.stopReason}; its output is incomplete`)
-      return JSON.stringify({ childSessionId: started.childId, stopReason: result.stopReason, output: result.output })
+      return JSON.stringify({ childSessionId: activation.childId, stopReason: result.stopReason, output: result.output })
     } catch (error) {
       row.state = 'failed'
       row.failure = String(error)
       throw error
     } finally {
       try {
-        if (started) {
-          await started.dispose()
-          if (this.ctx.agents.get(started.childId)) throw new Error('Naive child remained resident after disposal')
+        if (activation) {
+          await activation.dispose()
+          if (this.ctx.agents.get(activation.childId)) throw new Error('Naive child remained resident after disposal')
           row.disposed = true
         }
         row.endedAt = new Date().toISOString()

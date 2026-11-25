@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm';
 import type { ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools';
-import type { FusionEvent, Role, TaskId } from '../contracts.js';
+import type { FusionEvent, PhysicalRoute, Role, TaskId } from '../contracts.js';
 import { WorkspaceWriteLease } from '../execution/write-lease.js';
 import type { ResolvedProfile } from '../profile/resolve.js';
 import type { SqliteFusionStore } from '../task/sqlite-store.js';
@@ -38,6 +38,8 @@ export interface CoordinatorOptions {
     commandMaxSeconds?: number;
     /** Test clock only; production retains the recovered fixed schedule. */
     keepaliveClock?: KeepaliveClock;
+    /** Auto-register FusionCatalogAdapter when the host has not mounted one yet (default true). */
+    registerAdapter?: boolean;
 }
 /** At least a sentence that is not a stock stub. */
 export declare function substantiveReview(reason: string): boolean;
@@ -131,6 +133,10 @@ export declare class FusionCoordinator {
         role: Role;
     } | undefined;
     select(agent: Agent, resolved?: ResolvedProfile): Promise<void>;
+    /** Record the physical Lead route immediately before FusionCatalogAdapter dispatches a stream. */
+    recordLeadDispatch(sessionId: string, route: PhysicalRoute): void;
+    /** Return the persisted physical Lead route that produced one virtual-provider assistant message. */
+    leadMessageRoute(sessionId: string, messageId: string): PhysicalRoute | undefined;
     /** Only at idle selection or native running reservation, before prompt assembly. */
     selectBeforeAssembly(agent: Agent, resolved: ResolvedProfile): void;
     clear(agent: Agent): Promise<void>;

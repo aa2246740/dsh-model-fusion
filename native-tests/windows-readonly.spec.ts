@@ -65,10 +65,13 @@ describe.skipIf(process.platform !== 'win32')('Fusion roles over real Windows AC
       roles.ensure(workerHandle.agent, binding, 'worker')
       expect(ctx.sandboxPolicy.resolve({ session: leadHandle.agent.session }).mode).toBe('read-only')
       expect(ctx.sandboxPolicy.resolve({ session: workerHandle.agent.session }).mode).toBe('workspace-write')
-      const call = (handle: typeof leadHandle, id: string) => ctx.tools.execute({
-        name: 'pwsh', callId: ToolCallId(id), agent: handle.agent, signal: new AbortController().signal,
-        arguments: { command: 'Set-Content probe.txt test', description: 'Write the test-owned probe file', workdir: workspace },
-      })
+      const call = async (handle: typeof leadHandle, id: string) => (await ctx.tools.execute({
+        calls: [{
+          type: 'tool-call', id: ToolCallId(id), name: 'pwsh',
+          arguments: JSON.stringify({ command: 'Set-Content probe.txt test', description: 'Write the test-owned probe file', workdir: workspace }),
+        }],
+        agent: handle.agent, signal: new AbortController().signal,
+      })).results[0]!.result
       const denied = await call(leadHandle, 'lead-write')
       expect(denied.isError, JSON.stringify(denied)).not.toBe(true)
       expect(denied.value).toMatchObject({ kind: 'foreground', timedOut: false, aborted: false,

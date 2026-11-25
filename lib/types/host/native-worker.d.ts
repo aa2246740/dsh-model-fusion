@@ -8,16 +8,16 @@ export interface NativeWorkerRequest {
     /** Model-authored brief from the Lead's native tool call. */
     readonly brief: string;
     readonly route: PhysicalRoute;
-    /** 0.2.0 startContinuable persona. 0.2.1 rejects it; the role scope carries the prompt. */
+    /** Retained for caller compatibility; DSH 0.2.2 carries role prompts via NativeFusionScopes. */
     readonly persona: string;
-    /** 0.2.0 start-time tool ceiling. 0.2.1 rejects toolFilter; the role scope narrows tools. */
+    /** Retained for caller compatibility; DSH 0.2.2 carries tool ceilings via NativeFusionScopes. */
     readonly allowedTools: readonly string[];
 }
 export interface NativeWorkerAcceptance {
     readonly childId: string;
     readonly messageId: MessageId;
 }
-/** Version-pinned public API adapter. It never calls an LLM adapter or runs a shell itself. */
+/** Version-pinned public API adapter for DSH 0.2.2-rc.5. Never calls an LLM adapter or runs a shell itself. */
 export declare class NativeWorkerTransport {
     #private;
     private readonly ctx;
@@ -39,6 +39,10 @@ export declare class NativeWorkerTransport {
     /** Yield a blocking tool to native user steering without canceling or releasing the Worker. */
     settle(parent: Agent, childId: string, signal: AbortSignal, yieldToSteering: true): Promise<Agent | undefined>;
     stop(parent: Agent, childId: string): Promise<Agent>;
-    /** Native release owns quiescence, persistence and handle disposal across HMR. */
+    /**
+     * Release one child activation without closing the parent's subagent tree
+     * (`drainDescendants` puts `parent` in `closingRoots` until `parent` leaves
+     * the registry, which would block later delegations on a live Lead).
+     */
     release(parent: Agent, childId: string): Promise<void>;
 }

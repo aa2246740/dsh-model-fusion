@@ -26,6 +26,7 @@ import { digestOf } from '../src/digest.js'
 import { captureNativeReviewRequest, nativeReviewProof } from '../src/host/native-review.js'
 import { created } from '../tests/helpers.js'
 import { NativeFusionScopes } from '../src/host/native-scopes.js'
+import { FusionCatalogAdapter, FUSION_MODEL, FUSION_PROVIDER } from '../src/host/native-selection.js'
 import { completeProfile } from '../src/profile/resolve.js'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
@@ -33,14 +34,7 @@ const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
 
 async function drainLeadChildren(ctx: Context, parent: Agent) {
-  const subagents = ctx.subagents as {
-    drainChildren?: (parent: Agent, childIds: readonly SessionId[]) => Promise<void>
-    drainContinuableChildren?: (parent: Agent, childIds: readonly SessionId[]) => Promise<void>
-  }
-  const ids = ctx.agents.list().filter(agent => agent.session.header.parentSession === parent.id).map(agent => agent.id)
-  if (typeof subagents.drainChildren === 'function') await subagents.drainChildren(parent, ids)
-  else if (typeof subagents.drainContinuableChildren === 'function') await subagents.drainContinuableChildren(parent, ids)
-  else throw new Error('Fusion supports DeepSeek Harness 0.2.0-rc.2 and 0.2.1-rc.2; this host has neither subagents.drainChildren nor subagents.drainContinuableChildren')
+  await ctx.subagents.drainDescendants([parent])
 }
 
 async function setup(script: ConstructorParameters<typeof MockAdapter>[0]) {
@@ -233,7 +227,7 @@ describe('native persistent Worker transport', () => {
   it('keeps Fusion routing and tools scoped, and restores the native route on detach', async () => {
     const { ctx, parent, adapter } = await setup([textResponse('fusion'), textResponse('ordinary'), textResponse('native again')])
     // The real session controller owns this selection; the test composes the same public seam.
-    installModelSelection(parent.ctx, { current: { provider: 'test-native', model: 'lead' }, assembled: undefined })
+    installModelSelection(parent.ctx)
     const prompts = { lead: 'FUSION LEAD ONLY', worker: 'WORKER ONLY', compact: 'Checkpoint' }
     const profile = completeProfile({ id: 'fusion-auto', version: 'faithful-v1', enabled: true,
       lead: { provider: 'test-native', model: 'fusion-lead' }, worker: request.route }, prompts)
@@ -247,7 +241,19 @@ describe('native persistent Worker transport', () => {
           render: () => [{ type: 'text', text: 'ok' }] }, execute: async () => ({ ok: true }),
       }))],
     })
+    const unregisterAdapter = ctx.llm.registerAdapter([FUSION_PROVIDER], new FusionCatalogAdapter({
+      ctx,
+      coordinator: () => ({
+        owner: (agent: Agent) => scopes.get(agent),
+        modelControl: { route: (binding: { profile: typeof profile }, role: 'lead' | 'worker') => binding.profile[role] },
+        options: { profile: { profile, prompts } },
+        recordLeadDispatch() {},
+        leadMessageRoute: () => undefined,
+      }) as never,
+    }))
+    cleanups.push(async () => unregisterAdapter())
     scopes.install(parent, { schemaVersion: 1, sessionId: parent.id, taskId: TaskId('scoped'), selected: true, profile, prompts }, 'lead')
+    parent.model.select({ provider: FUSION_PROVIDER, model: FUSION_MODEL })
     const ordinary = (await ctx.agents.create({ sessionId: SessionId('ordinary'), agentOptions: { provider: 'test-native', model: 'ordinary-model' } })).agent
     expect(ctx.tools.get('fusion_probe', parent)).toBeDefined()
     expect(ctx.tools.get('fusion_probe', ordinary)).toBeUndefined()
@@ -260,6 +266,7 @@ describe('native persistent Worker transport', () => {
     expect(adapter.requests[1].model).toBe('ordinary-model')
     expect(JSON.stringify(adapter.requests[1].messages)).not.toContain('FUSION LEAD ONLY')
     scopes.detach(parent)
+    parent.model.select({ provider: 'test-native', model: 'lead' })
     expect(ctx.tools.get('fusion_probe', parent)).toBeUndefined()
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'third' }] }))
     await parent.whenIdle()

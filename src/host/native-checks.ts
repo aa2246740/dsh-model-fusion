@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { ToolExecutionPipeline } from '@deepseek-ai/dsh-tools/pipeline'
 import { ArtifactId, OperationId, SessionId } from '../contracts.js'
 import type { ToolEvidence, WorkOrder, WorkerReport } from '../contracts.js'
 import { digestOf, sha256Hex } from '../digest.js'
@@ -367,10 +368,23 @@ async function invokeCheck(input: CheckInput, check: FrozenCheck) {
   const remove = input.authorizeNested(callId)
   let result
   try {
-    result = await ctx.tools.execute({ callId, rootCallId: exec.rootCallId, parent: exec.token,
-      name: nativeShellTool, arguments: { command: check.definition.command, description: check.definition.description,
-        workdir: root, ...(input.nativeTimeout && check.definition.timeoutSeconds === undefined ? {} : { timeoutMs: (check.definition.timeoutSeconds ?? order.policy.commandMaxSeconds) * 1000 }), run_in_background: false },
-      agent: exec.agent, signal: exec.signal })
+    const pipeline = new ToolExecutionPipeline(ctx, {
+      get: (name, scope, toolSet) => ctx.tools.executable(name, scope, toolSet)
+        ?? (name === nativeShellTool ? ctx.tools.executable(name) : undefined),
+    })
+    const prepared = await pipeline.prepare({
+      callId, rootCallId: exec.rootCallId, parent: exec.token,
+      name: nativeShellTool,
+      arguments: {
+        command: check.definition.command, description: check.definition.description,
+        workdir: root,
+        ...(input.nativeTimeout && check.definition.timeoutSeconds === undefined ? {} : { timeoutMs: (check.definition.timeoutSeconds ?? order.policy.commandMaxSeconds) * 1000 }),
+        run_in_background: false,
+      },
+      agent: exec.agent, signal: exec.signal,
+    })
+    const dispatched = prepared.kind === 'dispatch' ? await pipeline.dispatch(prepared.exec) : prepared
+    result = await pipeline.complete(prepared.exec, dispatched)
   } catch (error) {
     const evidence: ToolEvidence = { ...started, state: 'outcome-unknown', endedAt: new Date().toISOString(),
       stderr: store.putArtifact(order.taskId, Buffer.from(String(error)), 'text/plain') }

@@ -1,16 +1,13 @@
-/**
- * 0.2.0 Cordis plugins are default-exported classes. Some 0.2.1 plugins,
- * including JSONL session persistence, are modules with `apply` and no default.
- */
+/** Cordis plugins may be default-exported classes or modules exposing `apply`. */
 export function hostPlugin(mod: object): object {
   if (typeof mod === 'function') return mod
   const record = mod as { default?: unknown; apply?: unknown }
   if (typeof record.default === 'function') return record.default
   if (typeof record.apply === 'function') return mod
-  throw new Error('Fusion supports DeepSeek Harness 0.2.0-rc.2 and 0.2.1-rc.2; this host plugin is neither a default export nor an apply module')
+  throw new Error('Fusion supports DeepSeek Harness 0.2.2-rc.5; this host plugin is neither a default export nor an apply module')
 }
 
-/** 0.2.1 SubagentRuntime injects `workingDirectory`. 0.2.0 does not, and must not load that service. */
+/** Mount `@deepseek-ai/dsh-working-directory` (and local fs if needed) required by DSH 0.2.2 `SubagentRuntime`. */
 export async function mountWorkingDirectory(ctx: { get(name: string): unknown; plugin(plugin: object, config?: object): Promise<unknown> }, cwd?: string): Promise<void> {
   const subagent = await import('@deepseek-ai/dsh-subagent')
   const service = hostPlugin(subagent) as { inject?: readonly string[] }

@@ -13,6 +13,7 @@ import { FUSION_CONTEXT_BUDGET } from '../errors.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import type { SessionBinding } from './bindings.js'
 import { nativeRequestAgent } from './native-request.js'
+import { isForwardedFusionRequest, isFusionSelection } from './native-selection.js'
 import { FUSION_TASK_CONTEXT, type NativeTaskContext } from './native-task-context.js'
 import type { NativeAuxiliaryRequests } from './native-auxiliary.js'
 import { routeNativeCompaction } from './native-compaction.js'
@@ -43,14 +44,15 @@ export class NativeContextGuard {
     const meter = this.ctx.get('tokenMeter')
     if (!meter) throw new Error('Fusion requires the native tokenMeter service')
     const separateCompactor = request.purpose === 'compaction' && owner.binding.profile.compactor
-    const route = separateCompactor ? separateCompactor.route : owner.binding.profile[owner.role]
+    const route = separateCompactor ? separateCompactor.route : (this.route?.(owner.binding, owner.role) ?? owner.binding.profile[owner.role])
     const policy = owner.binding.profile.context[owner.role]
-    if (request.provider !== route.provider || request.model !== route.model) {
+    const virtualLead = owner.role === 'lead' && !separateCompactor && isFusionSelection(request)
+    if (!virtualLead && (request.provider !== route.provider || request.model !== route.model)) {
       throw new Error('Fusion request must use its frozen role or compactor model')
     }
     const logged = isAgentLoopRequest(request) ? agent.session.requestContext() : undefined
     const capacity = logged?.provider === request.provider && logged.model === request.model
-      ? logged.contextWindow : (await this.ctx.llm.resolveModelInfo(request.provider, request.model, request.signal)).context?.contextWindow
+      ? logged.contextWindow : (await this.ctx.llm.resolveModelInfo(route.provider, route.model, request.signal)).context?.contextWindow
     if (!Number.isSafeInteger(capacity) || Number(capacity) <= 0) throw new Error('The configured model does not disclose a usable context window')
     const contextWindow = Number(capacity), output = request.maxTokens
     if (!Number.isSafeInteger(output) || Number(output) <= 0) throw new Error('Fusion requires an explicit output token reservation')
@@ -89,27 +91,32 @@ export class NativeContextGuard {
     ready: (agent: Agent, request: GenerateOptions) => void): () => void {
     const guard = this
     const disposeStream = this.ctx.on('llm/stream', async function* (request, next): AsyncIterable<StreamChunk> {
+      if (isForwardedFusionRequest(request)) { yield* next(); return }
       const agent = nativeRequestAgent(guard.ctx, request), owner = agent && guard.owner(agent)
       if (!agent || !owner) { yield* next(); return }
       const auxiliary = guard.auxiliary?.get(request)
+      const physicalRoute = guard.route?.(owner.binding, owner.role) ?? owner.binding.profile[owner.role]
+      const physicalRequest = isFusionSelection(request)
+        ? { ...request, provider: physicalRoute.provider, model: physicalRoute.model }
+        : request
       ready(agent, request)
       if (owner.binding.profile.interactionMode === 'model-like') {
         // The native compactor and actual physical adapter own window/defaults.
         // Keep request/effect admission, without inventing a second output cap.
-        routeNativeCompaction(request, owner.binding.profile, guard.route?.(owner.binding, owner.role))
-        admit(agent, owner, request)
+        routeNativeCompaction(request, owner.binding.profile, physicalRoute)
+        admit(agent, owner, request.purpose === 'compaction' ? request : physicalRequest)
         yield* next()
         return
       }
       let check: ContextCheck
       try {
-        routeNativeCompaction(request, owner.binding.profile)
+        routeNativeCompaction(request, owner.binding.profile, physicalRoute)
         check = await guard.measure(agent, owner, request)
       }
       catch (error) {
         const reason = `Fusion 上下文检查失败：${error instanceof Error ? error.message : String(error)}`
         if (!auxiliary && request.purpose !== 'session-title') guard.blocked(owner, reason)
-        yield { type: 'finish', reason: { kind: 'error', failure: new LlmError(reason, 'FUSION_CONTEXT_UNAVAILABLE').failure } }
+        yield { type: 'finish', reason: { kind: 'error', failure: LlmError.fromFailure({ message: reason, code: 'FUSION_CONTEXT_UNAVAILABLE' }).failure } }
         return
       }
       request.signal?.throwIfAborted()
@@ -121,14 +128,14 @@ export class NativeContextGuard {
         const reason = `Fusion 上下文 ${check.measurement.inputTokens} 超过本轮预算 ${check.budget}（估算）`
         if (isAgentLoopRequest(request) && request.purpose === undefined) guard.#rejected.set(agent, { owner, recordId, ...check })
         else if (!auxiliary && request.purpose !== 'session-title') guard.blocked(owner, reason)
-        yield { type: 'finish', reason: { kind: 'error', failure: new LlmError(reason, FUSION_CONTEXT_BUDGET).failure } }
+        yield { type: 'finish', reason: { kind: 'error', failure: LlmError.fromFailure({ message: reason, code: FUSION_CONTEXT_BUDGET }).failure } }
         return
       }
       if (isAgentLoopRequest(request) && request.purpose === undefined) guard.#rejected.delete(agent)
       // Run spend reservation only after context admission; rejected local
       // attempts are neither upstream calls nor consumed call allowances.
       ready(agent, request)
-      admit(agent, owner, request)
+      admit(agent, owner, request.purpose === 'compaction' ? request : physicalRequest)
       yield* next()
     }, { prepend: true })
     const disposeRecovery = this.ctx.on('agent/request-error', async ({ agent, turn, step, failure, signal }, next) => {

@@ -166,7 +166,9 @@ export class NativeEffects {
   }
 
   backgroundProblem(exec: Readonly<ToolExecution>): string | undefined {
-    if (!this.#registry || !exec.agent || !this.ctx.tools.get('job_output', exec.agent?.id) || !this.ctx.tools.get('job_kill', exec.agent?.id)) {
+    if (!this.#registry || !exec.agent
+      || !this.ctx.tools.get('job_output', exec.agent, exec.toolSet)
+      || !this.ctx.tools.get('job_kill', exec.agent, exec.toolSet)) {
       return 'Background commands require the native jobs runtime and visible job_output/job_kill tools'
     }
     return undefined

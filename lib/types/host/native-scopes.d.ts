@@ -23,11 +23,11 @@ export interface FusionScopeCallbacks {
         defaultMaxTokens?: number;
         testedOutputCap?: number;
     }>;
-    /** Read-stage tools, presented natively. Undefined restores the native composition. */
+    /** Stage tool allowlist. Undefined keeps the full inherited tool set. */
     readOnlyTools?(agent: Agent, binding: SessionBinding, role: Role): readonly string[] | undefined;
-    installTools(scope: Context, agent: Agent, binding: SessionBinding, role: Role): readonly (() => void)[];
+    installTools(scope: Context, agent: Agent, binding: SessionBinding, role: Role, isAllowed: (toolName: string) => boolean): readonly (() => void)[];
 }
-/** Physical routing, prompt and tools live in the exact native Agent scope. */
+/** Role prompt, tool boundaries, and request gates live in the exact native Agent scope. */
 export declare class NativeFusionScopes {
     #private;
     private readonly callbacks;
@@ -38,8 +38,10 @@ export declare class NativeFusionScopes {
     } | undefined;
     assertReady(agent: Agent): void;
     install(agent: Agent, binding: SessionBinding, role: Role): void;
-    /** Refresh at the persisted state transition, before native prompt providers run. */
+    /** Refresh stage tool restrictions before the next step's `tools.resolve()`. */
     refreshTools(agent: Agent): void;
+    /** Sync a resident Worker's native model selection after a model-control route switch. */
+    syncModel(agent: Agent): void;
     /**
      * Caller owns quiescence and the original session-controller model selection.
      * Removing these listeners reveals that existing selection; it does not mutate

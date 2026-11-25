@@ -1,5 +1,5 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
-import type {} from '@deepseek-ai/dsh-tools/types'
+import type {} from '@deepseek-ai/dsh-tools'
 
 /** Plugin-owned presentation record; never appended to a native Session. */
 export interface FusionActivity {

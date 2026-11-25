@@ -1,6 +1,7 @@
 import { isAgentLoopRequest, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { PairProfile, PhysicalRoute } from '../contracts.js'
+import { isFusionSelection } from './native-selection.js'
 
 /**
  * Public llm/stream routing for the Host's mutable, one-shot summary envelope.
@@ -8,7 +9,10 @@ import type { PairProfile, PhysicalRoute } from '../contracts.js'
  * Never replace a prepared AgentLoop request or start a nested model call.
  */
 export function routeNativeCompaction(request: GenerateOptions, profile: PairProfile, effectiveRoute?: PhysicalRoute): void {
-  const choice = profile.compactor ?? (effectiveRoute && profile.interactionMode === 'model-like' ? { route: effectiveRoute, maxOutputTokens: request.maxTokens } : undefined)
+  const choice = profile.compactor
+    ?? (effectiveRoute && (profile.interactionMode === 'model-like' || isFusionSelection(request))
+      ? { route: effectiveRoute, maxOutputTokens: request.maxTokens }
+      : undefined)
   if (request.purpose !== 'compaction' || !choice) return
   if (isAgentLoopRequest(request)) {
     throw new Error('DSH 压缩请求已冻结，无法通过公开接口选择压缩模型')

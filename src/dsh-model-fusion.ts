@@ -10,7 +10,7 @@ import type {} from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
-import { FusionCatalogAdapter, FUSION_PROVIDER, FUSION_MODEL, installNativeFusionSelection } from './host/native-selection.js'
+import { FusionCatalogAdapter, FUSION_PROVIDER, FUSION_MODEL, installFusionRequestCapture, installNativeFusionSelection } from './host/native-selection.js'
 import type { ResolvedProfile } from './profile/resolve.js'
 import { choiceFromProfile, modelProfileFromChoice, validatePairChoice, savedLeadRoute } from './host/settings.js'
 import { CachePolicy, cacheView } from './host/cache-policy.js'
@@ -100,11 +100,16 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   }
   // The catalog entry admits what the configured Lead admits: the Lead is the
   // only role that reads user content, while the Worker receives text work orders.
-  const leadInputModalities = async (): Promise<readonly ModelModality[] | undefined> => {
+  const configuredLead = () => {
     try {
       const saved = store.readDocument('settings:profile')?.value
-      const lead = savedLeadRoute(saved)
+      return savedLeadRoute(saved)
         ?? (config.profilePath && isAbsolute(config.profilePath) ? savedLeadRoute(loadJsonObject(config.profilePath)) : undefined)
+    } catch { return undefined }
+  }
+  const leadInputModalities = async (): Promise<readonly ModelModality[] | undefined> => {
+    try {
+      const lead = configuredLead()
       if (!lead) return undefined
       return (await ctx.llm.resolveModelInfo(lead.provider, lead.model)).inputModalities
     } catch {
@@ -113,15 +118,17 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
       return undefined
     }
   }
-  ctx.effect(() => ctx.llm.registerAdapter([FUSION_PROVIDER], new FusionCatalogAdapter(leadInputModalities)))
+  ctx.effect(() => installFusionRequestCapture(ctx))
+  ctx.effect(() => ctx.llm.registerAdapter([FUSION_PROVIDER], new FusionCatalogAdapter({
+    ctx, leadInputModalities, coordinator: () => runtime, configuredLead,
+  })))
   ctx.effect(() => installNativeFusionSelection(ctx, {
     coordinator: () => runtime, profile: () => defaultProfile,
     selection: agent => {
-      const selection = agent.session.snapshotEvents().findLast(event => event.type === 'model/selection')
-      if (selection?.type === 'model/selection') return selection.data
+      const current = agent.model.current()
+      if (current) return current
       if (bindings.read(agent.id)?.binding.selected) return { provider: FUSION_PROVIDER, model: FUSION_MODEL }
-      const header = agent.session.requestHeader()
-      return header ? { provider: header.config.provider, model: header.config.model } : ctx.agentDefaultModel.currentSelection()
+      return ctx.agentDefaultModel.currentSelection()
     },
   }))
   // Frozen bindings must be restored before another user request is allowed.
@@ -209,6 +216,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
               lead: controller.modelControl.route(binding, 'lead'), worker: controller.modelControl.route(binding, 'worker'), [change.role]: change.route }))
           }
           await controller.modelControl.continue(body.sessionId, body.taskId, Number(body.revision), change)
+          if (change?.role === 'lead') ctx.emit('llm/models-updated', FUSION_PROVIDER)
         }
         return json(res, 200, { ok: true })
       }
@@ -226,6 +234,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         const revision = store.writeDocument('settings:profile', Number(body.revision), modelProfileFromChoice(pair))
         const profile = await configuredProfile()
         await getRuntime(profile)
+        ctx.emit('llm/models-updated', FUSION_PROVIDER)
         return json(res, 200, { ok: true, revision })
       }
       if (body.action === 'authorize') {

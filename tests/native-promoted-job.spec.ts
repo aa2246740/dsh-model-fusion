@@ -46,7 +46,7 @@ function fixture(shell: 'bash' | 'pwsh', jobKind: string = shell) {
   } }
 }
 
-describe.each(['bash', 'pwsh'] as const)('%s foreground timeout promotion', shell => {
+describe.each(['bash', 'pwsh'] as const)('%s foreground timeout promotion', (shell: 'bash' | 'pwsh') => {
   it('retains the pending effect until the authoritative native job settles', async () => {
     const f = fixture(shell)
     try {
